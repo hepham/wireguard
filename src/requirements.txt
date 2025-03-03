@@ -1,0 +1,5 @@
+Flask
+tinydb
+ifcfg
+icmplib
+flask-qrcode

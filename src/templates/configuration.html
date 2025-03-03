@@ -1,0 +1,276 @@
+<html>
+{% with title=title%}
+    {% include "header.html"%}
+{% endwith %}
+<body>
+	{% include "navbar.html" %}
+	<div class="container-fluid">
+		{% include "sidebar.html" %}
+        <div class="col-md-9 ml-sm-auto col-lg-10 px-md-4 mt-4 mb-4">
+            <div class="form-group">
+                <input type="text" class="form-control" id="search_peer_textbox" placeholder="Search Peer..." value="" style="display: none">
+            </div>
+        </div>
+		<div id="config_body"></div>
+	</div>
+	<div class="modal fade" id="add_modal" data-backdrop="static" data-keyboard="false" tabindex="-1"
+		aria-labelledby="staticBackdropLabel" aria-hidden="true">
+		<div class="modal-dialog modal-dialog-centered modal-lg">
+			<div class="modal-content">
+				<div class="modal-header">
+					<h5 class="modal-title" id="staticBackdropLabel">Add a new peer</h5>
+					<button type="button" class="close" data-dismiss="modal" aria-label="Close">
+						<span aria-hidden="true">&times;</span>
+					</button>
+				</div>
+				<div class="modal-body">
+					<div id="add_peer_alert" class="alert alert-danger alert-dismissible fade show d-none" role="alert">
+						<button type="button" class="close" data-dismiss="alert" aria-label="Close">
+						  <span aria-hidden="true">&times;</span>
+						</button>
+					</div>
+					<form id="add_peer_form">
+                        <div class="alert alert-warning" role="alert" style="font-size: 0.8rem">
+                            To generate QR code for this new peer, you need to provide the private key, or use the generated key. If you don't need the QR code, simply remove the private key and insert your existed public key.
+                        </div>
+                        <div class="form-group">
+                            <div>
+                                <label for="private_key">Private Key</label>
+                            </div>
+                            <div class="input-group">
+                                <input type="text" class="form-control" id="private_key" aria-describedby="public_key">
+                                <div class="input-group-append">
+                                   <button type="button" class="btn btn-danger" id="re_generate_key"><i class="bi bi-arrow-repeat"></i></button>
+                                </div>
+                            </div>
+                        </div>
+						<div class="form-group">
+							<label for="public_key">Public Key <code>(Required)</code></label>
+							<input type="text" class="form-control" id="public_key" aria-describedby="public_key" disabled>
+						</div>
+                        <div class="row">
+                            <div class="col-sm-6">
+                                 <div class="form-group">
+                                    <label for="new_add_name">Name</label>
+                                    <input type="text" class="form-control" id="new_add_name">
+                                </div>
+                            </div>
+                            <div class="col-sm-6">
+                                <div class="form-group">
+                                    <label for="allowed_ips">Allowed IPs <code>(Required)</code></label>
+                                    <input type="text" class="form-control" id="allowed_ips">
+                                </div>
+                            </div>
+                            <div class="col-sm-6">
+                                 <div class="form-group">
+                                    <label for="new_add_DNS">DNS <code>(Required)</code></label>
+                                    <input type="text" class="form-control" id="new_add_DNS" value="{{ DNS }}">
+                                </div>
+                            </div>
+                            <div class="col-sm-6">
+                                 <div class="form-group">
+                                    <label for="new_add_endpoint_allowed_ip">Endpoint Allowed IPs <code>(Required)</code></label>
+                                    <input type="text" class="form-control" id="new_add_endpoint_allowed_ip" value="{{ endpoint_allowed_ip }}">
+                                </div>
+                            </div>
+                            <div class="col-sm-6">
+                                 <div class="form-group">
+                                    <label for="new_add_MTU">MTU</label>
+                                    <input type="text" class="form-control" id="new_add_MTU" value="{{ mtu }}">
+                                </div>
+                            </div>
+                            <div class="col-sm-6">
+                                 <div class="form-group">
+                                    <label for="new_add_keep_alive">Persistent keepalive</label>
+                                    <input type="text" class="form-control" id="new_add_keep_alive" value="{{ keep_alive }}">
+                                </div>
+                            </div>
+                        </div>
+					</form>
+				</div>
+				<div class="modal-footer">
+					<button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+					<button type="button" class="btn btn-primary" id="save_peer" conf_id={{conf_data['name']}}>Save</button>
+				</div>
+			</div>
+		</div>
+	</div>
+	<div class="modal fade" id="delete_modal" data-backdrop="static" data-keyboard="false" tabindex="-1"
+		aria-labelledby="staticBackdropLabel" aria-hidden="true">
+		<div class="modal-dialog modal-dialog-centered">
+			<div class="modal-content">
+				<div class="modal-header">
+					<h5 class="modal-title" id="staticBackdropLabel">Are you sure to delete this peer?</h5>
+					<button type="button" class="close" data-dismiss="modal" aria-label="Close">
+						<span aria-hidden="true">&times;</span>
+					</button>
+				</div>
+				<div class="modal-body">
+					<div id="remove_peer_alert" class="alert alert-danger alert-dismissible fade show d-none" role="alert">
+						<button type="button" class="close" data-dismiss="alert" aria-label="Close">
+						  <span aria-hidden="true">&times;</span>
+						</button>
+					</div>
+					<h6>This action is not reversible.</h6>
+				</div>
+				<div class="modal-footer">
+					<button type="button" class="btn btn-secondary" data-dismiss="modal">No</button>
+					<button type="button" class="btn btn-danger" id="delete_peer" conf_id={{conf_data['name']}} peer_id="">Yes</button>
+				</div>
+			</div>
+		</div>
+	</div>
+
+    <div class="modal fade" id="setting_modal" data-backdrop="static" data-keyboard="false" tabindex="-1"
+		aria-labelledby="staticBackdropLabel" aria-hidden="true" conf_id={{conf_data['name']}} peer_id="">
+		<div class="modal-dialog modal-dialog-centered modal-lg">
+			<div class="modal-content">
+				<div class="modal-header">
+					<h5 class="peer_name"></h5>
+					<button type="button" class="close" data-dismiss="modal" aria-label="Close">
+						<span aria-hidden="true">&times;</span>
+					</button>
+				</div>
+				<div class="modal-body">
+                    <div id="setting_peer_alert" class="alert alert-danger alert-dismissible fade show d-none" role="alert">
+						<button type="button" class="close" data-dismiss="alert" aria-label="Close">
+						  <span aria-hidden="true">&times;</span>
+						</button>
+					</div>
+                    <div>
+                      <label for="peer_private_key_textbox" class="form-label">Private Key <code>(Required for QR Code and download)</code></label>
+                      <input type="password" class="form-control" id="peer_private_key_textbox" style="padding-right: 40px">
+                      <a class="peer_private_key_textbox_switch"><i class="bi bi-eye-fill"></i></a>
+                    </div>
+                    <hr>
+
+                    <div class="row">
+                        <div class="col-sm-6">
+                            <div class="mb-3">
+                              <label for="peer_name_textbox" class="form-label">Name</label>
+                              <input type="text" class="form-control" id="peer_name_textbox" placeholder="">
+                            </div>
+                        </div>
+                        <div class="col-sm-6">
+                            <div class="mb-3">
+                              <label for="peer_allowed_ip_textbox" class="form-label">Allowed IPs <code>(Required)</code></label>
+                              <input type="text" class="form-control" id="peer_allowed_ip_textbox">
+                            </div>
+                        </div>
+                        <div class="col-sm-6">
+                            <div class="mb-3">
+                              <label for="peer_DNS_textbox" class="form-label">DNS <code>(Required)</code></label>
+                              <input type="text" class="form-control" id="peer_DNS_textbox">
+                            </div>
+                        </div>
+                        <div class="col-sm-6">
+                            <div class="mb-3">
+                              <label for="peer_endpoint_allowed_ips" class="form-label">Endpoint Allowed IPs <code>(Required)</code></label>
+                              <input type="text" class="form-control" id="peer_endpoint_allowed_ips">
+                            </div>
+                        </div>
+                        <div class="col-sm-6">
+                            <div class="mb-3">
+                              <label for="peer_mtu" class="form-label">MTU</label>
+                              <input type="text" class="form-control" id="peer_mtu">
+                            </div>
+                        </div>
+                        <div class="col-sm-6">
+                            <div class="mb-3">
+                              <label for="peer_keep_alive" class="form-label">Persistent Keepalive</label>
+                              <input type="text" class="form-control" id="peer_keep_alive">
+                            </div>
+                        </div>
+                    </div>
+				</div>
+				<div class="modal-footer">
+					<button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+					<button type="button" class="btn btn-primary" id="save_peer_setting" conf_id={{conf_data['name']}} peer_id="">Save</button>
+				</div>
+			</div>
+		</div>
+	</div>
+
+    <div class="modal fade" id="qrcode_modal" data-backdrop="static" data-keyboard="false" tabindex="-1"
+		aria-labelledby="staticBackdropLabel" aria-hidden="true">
+		<div class="modal-dialog modal-dialog-centered">
+			<div class="modal-content">
+				<div class="modal-header">
+					<h5 class="peer_name">QR Code</h5>
+					<button type="button" class="close" data-dismiss="modal" aria-label="Close">
+						<span aria-hidden="true">&times;</span>
+					</button>
+				</div>
+				<div class="modal-body">
+                    <img src="" id="qrcode_img" style="width: 100%">
+				</div>
+			</div>
+		</div>
+	</div>
+
+    <div class="position-fixed top-0 right-0 p-3" style="z-index: 5; right: 0; top: 50px;">
+          <div id="alertToast" class="toast hide" role="alert" aria-live="assertive" aria-atomic="true" data-delay="5000">
+            <div class="toast-header">
+                  <strong class="mr-auto">Wireguard Dashboard</strong>
+                  <button type="button" class="ml-2 mb-1 close" data-dismiss="toast" aria-label="Close">
+                    <span aria-hidden="true">&times;</span>
+                  </button>
+            </div>
+            <div class="toast-body">
+            </div>
+          </div>
+    </div>
+    {% include "tools.html" %}
+</body>
+{% include "footer.html" %}
+<script>
+    var conf_name = "{{ conf_data['name'] }}"
+    $(".sb-"+conf_name+"-url").addClass("active");
+    // Progress Bar
+    let bar = $(".progress-bar")
+    function startProgressBar(){
+        bar.css("width","0%")
+        bar.css("opacity", "100")
+        bar.css("background", "rgb(255,69,69)")
+        bar.css("background", "linear-gradient(145deg, rgba(255,69,69,1) 0%, rgba(0,115,186,1) 100%)")
+        bar.css("width","25%")
+        setTimeout(function(){
+            stillLoadingProgressBar();
+        },300)
+    }
+    function stillLoadingProgressBar(){
+        bar.css("transition", "3s ease-in-out")
+        bar.css("width", "75%")
+    }
+    function endProgressBar(){
+        bar.css("transition", "0.3s ease-in-out")
+        bar.css("width","100%")
+        setTimeout(function(){
+            bar.css("opacity", "0")
+        },250)
+
+    }
+	function load_data(search){
+        startProgressBar()
+		$.ajax({
+			method: "GET",
+			url: "/get_config/"+conf_name+"?search="+encodeURIComponent(search),
+			headers:{
+				"Content-Type": "application/json"
+			},
+			success: function (response){
+				$("#config_body").html(response);
+                $("#search_peer_textbox").css("display", "block")
+                endProgressBar()
+			}
+		})
+	}
+	$(document).ready(function(){
+		load_data($('#search_peer_textbox').val());
+		setInterval(function(){
+			load_data($('#search_peer_textbox').val());
+		}, {{dashboard_refresh_interval}})
+	});
+</script>
+<script src="{{ url_for('static',filename='js/configuration.js') }}"></script>
+</html>	
