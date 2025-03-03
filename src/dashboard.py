@@ -1136,7 +1136,7 @@ def add_peer(config_name):
         # 2. Tạo allowed_ips dạng 10.66.66.xx/32
         base_ip = "10.66.66"  # Phần IP cố định
         existing_ips = [
-            int(peer['allowed_ips'].split('.')[3].split('/')[0]
+            int(peer['allowed_ips'].split('.')[3].split('/')[0])
             for peer in db.all()
             if 'allowed_ips' in peer and peer['allowed_ips'].startswith(base_ip)
         ]
@@ -1151,17 +1151,17 @@ def add_peer(config_name):
 
         # 4. Tạo config
         config_content = f"""# {data['name']}
-[Interface]
-PrivateKey = {private_key}
-Address = {allowed_ips}
-DNS = {data['DNS']}
+            [Interface]
+            PrivateKey = {private_key}
+            Address = {allowed_ips}
+            DNS = {data['DNS']}
 
-[Peer]
-PublicKey = SERVER_PUBKEY_HERE
-Endpoint = your.server.com:51820
-AllowedIPs = 0.0.0.0/0
-PersistentKeepalive = {data.get('keep_alive', 25)}
-"""
+            [Peer]
+            PublicKey = SERVER_PUBKEY_HERE
+            Endpoint = your.server.com:51820
+            AllowedIPs = 0.0.0.0/0
+            PersistentKeepalive = {data.get('keep_alive', 25)}
+            """
 
         # 5. Lưu database
         db.insert({
