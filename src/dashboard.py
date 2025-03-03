@@ -1120,79 +1120,70 @@ def get_next_available_ip(config_name):
     return f"10.0.0.{next_ip}/32"
 
 @app.route('/create_client/<config_name>', methods=['POST'])
-def create_client(config_name):
+def add_peer(config_name):
+    db = TinyDB(f"db/{config_name}.json")
+    peers = Query()
+    data = request.get_json()
     try:
-        # Lấy thông tin từ request
-        data = request.get_json()
-        client_name = data.get('name', 'New Client')
-        dns = data.get('DNS', '1.1.1.1')
-        endpoint_allowed_ip = data.get('endpoint_allowed_ip', '0.0.0.0/0')
+        # 1. Tạo key pair
+        private_key = subprocess.check_output(['wg', 'genkey'], text=True).strip()
+        public_key = subprocess.check_output(
+            ['wg', 'pubkey'], 
+            input=private_key, 
+            text=True
+        ).strip()
+
+        # 2. Tạo allowed_ips dạng 10.66.66.xx/32
+        base_ip = "10.66.66"  # Phần IP cố định
+        existing_ips = [
+            int(peer['allowed_ips'].split('.')[3].split('/')[0]
+            for peer in db.all()
+            if 'allowed_ips' in peer and peer['allowed_ips'].startswith(base_ip)
+        ]
         
-        # Tự động cấp IP cho client
-        client_ip = get_next_available_ip(config_name)
-            
-        # Tạo key mới cho client
-        keys = gen_private_key()
-        private_key = keys['private_key']
-        public_key = keys['public_key']
-        
-        # Thêm peer vào WireGuard
-        try:
-            subprocess.check_output(
-                f"wg set {config_name} peer {public_key} allowed-ips {client_ip}",
-                shell=True,
-                stderr=subprocess.STDOUT
-            )
-            subprocess.check_output(
-                f"wg-quick save {config_name}", 
-                shell=True,
-                stderr=subprocess.STDOUT
-            )
-        except subprocess.CalledProcessError as e:
-            return jsonify({'error': f'Lỗi khi thêm peer: {e.output.decode()}'}), 500
+        # Tìm IP tiếp theo
+        next_ip = max(existing_ips) + 1 if existing_ips else 2  # Bắt đầu từ .2
+        allowed_ips = f"{base_ip}.{next_ip}/32"
 
-        # Lưu thông tin vào database
-        db = TinyDB(f"db/{config_name}.json")
-        peers = Query()
-        db.insert({
-            "id": public_key,
-            "name": client_name,
-            "private_key": private_key,
-            "allowed_ip": client_ip,
-            "DNS": dns,
-            "endpoint_allowed_ip": endpoint_allowed_ip
-        })
-        db.close()
+        # 3. Kiểm tra IP trùng
+        if db.search(peers.allowed_ips == allowed_ips):
+            return jsonify({"error": "IP đã tồn tại"}), 409
 
-        # Tạo config file
-        config = get_dashboard_conf()
-        server_public_key = get_conf_pub_key(config_name)
-        listen_port = get_conf_listen_port(config_name)
-        endpoint = f"{config.get('Peers','remote_endpoint')}:{listen_port}"
-
-        client_config = f"""[Interface]
+        # 4. Tạo config
+        config_content = f"""# {data['name']}
+[Interface]
 PrivateKey = {private_key}
-Address = {client_ip}
-DNS = {dns}
+Address = {allowed_ips}
+DNS = {data['DNS']}
 
 [Peer]
-PublicKey = {server_public_key}
-AllowedIPs = {endpoint_allowed_ip}
-Endpoint = {endpoint}
-PersistentKeepalive = 25
+PublicKey = SERVER_PUBKEY_HERE
+Endpoint = your.server.com:51820
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = {data.get('keep_alive', 25)}
 """
-        # Trả về response với file config và thông tin IP đã cấp
-        response = make_response(jsonify({
-            'config': client_config,
-            'assigned_ip': client_ip,
-            'name': client_name
-        }))
-        response.headers['Content-Type'] = 'application/json'
-        
+
+        # 5. Lưu database
+        db.insert({
+            'name': data['name'],
+            'public_key': public_key,
+            'private_key': private_key,
+            'allowed_ips': allowed_ips,
+            'DNS': data['DNS'],
+            'created_at': datetime.now().isoformat()
+        })
+
+        # 6. Trả về file config
+        response = make_response(config_content)
+        response.headers['Content-Disposition'] = \
+            f'attachment; filename="{data["name"]}_wg.conf"'
         return response
 
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": f"Lỗi WireGuard: {e.output.decode()}"}), 500
+
+    finally:
+        db.close()
 
 """
 Dashboard Initialization
