@@ -205,15 +205,20 @@ def get_transfer(config_name, db, peers):
         data_usage = subprocess.check_output("wg show " + config_name + " transfer", shell=True)
     except Exception:
         return "stopped"
+    
     data_usage = data_usage.decode("UTF-8").split()
     count = 0
     for i in range(int(len(data_usage) / 3)):
         cur_i = db.search(peers.id == data_usage[count])
-        total_sent = cur_i[0]['total_sent']
-        total_receive = cur_i[0]['total_receive']
-        traffic = cur_i[0]['traffic']
+        
+        # Kiểm tra và khởi tạo giá trị mặc định
+        total_sent = cur_i[0].get('total_sent', 0)  # Sử dụng get để lấy giá trị hoặc 0 nếu không tồn tại
+        total_receive = cur_i[0].get('total_receive', 0)  # Tương tự cho total_receive
+        traffic = cur_i[0].get('traffic', [])  # Khởi tạo traffic là danh sách rỗng nếu không tồn tại
+        
         cur_total_sent = round(int(data_usage[count + 2]) / (1024 ** 3), 4)
         cur_total_receive = round(int(data_usage[count + 1]) / (1024 ** 3), 4)
+        
         if cur_i[0]["status"] == "running":
             if total_sent <= cur_total_sent and total_receive <= cur_total_receive:
                 total_sent = cur_total_sent
@@ -221,15 +226,21 @@ def get_transfer(config_name, db, peers):
             else:
                 now = datetime.now()
                 ctime = now.strftime("%d/%m/%Y %H:%M:%S")
-                traffic.append(
-                    {"time": ctime, "total_receive": round(total_receive, 4), "total_sent": round(total_sent, 4),
-                     "total_data": round(total_receive + total_sent, 4)})
+                traffic.append({
+                    "time": ctime,
+                    "total_receive": round(total_receive, 4),
+                    "total_sent": round(total_sent, 4),
+                    "total_data": round(total_receive + total_sent, 4)
+                })
                 total_sent = 0
                 total_receive = 0
-                db.update({"traffic": traffic}, peers.id == data_usage[count])
-            db.update({"total_receive": round(total_receive, 4),
-                       "total_sent": round(total_sent, 4),
-                       "total_data": round(total_receive + total_sent, 4)}, peers.id == data_usage[count])
+            
+            db.update({
+                "traffic": traffic,
+                "total_receive": round(total_receive, 4),
+                "total_sent": round(total_sent, 4),
+                "total_data": round(total_receive + total_sent, 4)
+            }, peers.id == data_usage[count])
 
         count += 3
 
