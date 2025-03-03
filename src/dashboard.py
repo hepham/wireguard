@@ -1120,7 +1120,7 @@ def get_next_available_ip(config_name):
     return f"10.0.0.{next_ip}/32"
 
 @app.route('/create_client/<config_name>', methods=['POST'])
-def add_peer(config_name):
+def create_client(config_name):
     db = TinyDB(f"db/{config_name}.json")
     peers = Query()
     data = request.get_json()
