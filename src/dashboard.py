@@ -1297,13 +1297,10 @@ def init_dashboard():
         config['Peers']['peer_keep_alive'] = "21"
     config.write(open(dashboard_conf, "w"))
     config.clear()
-
-
+from threading import Thread
 
 if __name__ == "__main__":
     init_dashboard()
-    cleanup_thread = Thread(target=cleanup_inactive_peers, daemon=True)
-    cleanup_thread.start()
 
     config = configparser.ConfigParser(strict=False)
     config.read('wg-dashboard.ini')
