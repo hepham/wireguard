@@ -1150,6 +1150,7 @@ def create_client(config_name):
     
     public_key = get_conf_pub_key(config_name)
     listen_port = get_conf_listen_port(config_name)
+    config = get_dashboard_conf()
     endpoint = config.get("Peers","remote_endpoint") + ":" + listen_port
     filename = data["name"]
     if len(filename) == 0:
