@@ -20,6 +20,10 @@ dashboard_version = 'v2.3.1'
 dashboard_conf = 'wg-dashboard.ini'
 # Upgrade Required
 update = ""
+DEFAULT_DNS="1.1.1.1"
+DEFAULT_ENDPOINT_ALLOWED_IP="0.0.0.0/0"
+BASE_IP = "10.66.66"  # Phần IP cố định
+# DEFAULT=
 # Flask App Configuration
 app = Flask("WGDashboard")
 app.secret_key = secrets.token_urlsafe(16)
@@ -1097,93 +1101,92 @@ def traceroute_ip():
     except Exception:
         return "Error"
 
-def get_next_available_ip(config_name):
-    """Tìm IP tiếp theo có thể sử dụng trong dải mạng"""
-    db = TinyDB(f"db/{config_name}.json")
-    peers = db.all()
-    
-    # Lấy tất cả IP đã sử dụng
-    used_ips = set()
-    for peer in peers:
-        if 'allowed_ip' in peer:
-            # Chuyển "10.0.0.2/32" thành 2
-            ip = peer['allowed_ip'].split('.')[3].split('/')[0]
-            used_ips.add(int(ip))
-    
-    # Tìm số tiếp theo có thể sử dụng, bắt đầu từ 2
-    # (vì 1 thường dành cho server)
-    next_ip = 2
-    while next_ip in used_ips:
-        next_ip += 1
-    
-    # Trả về IP đầy đủ dạng "10.0.0.X/32"
-    return f"10.0.0.{next_ip}/32"
 
 @app.route('/create_client/<config_name>', methods=['POST'])
 def create_client(config_name):
     db = TinyDB(f"db/{config_name}.json")
     peers = Query()
     data = request.get_json()
-    try:
-        # 1. Tạo key pair
-        private_key = subprocess.check_output(['wg', 'genkey'], text=True).strip()
-        public_key = subprocess.check_output(
-            ['wg', 'pubkey'], 
-            input=private_key, 
-            text=True
-        ).strip()
-
-        # 2. Tạo allowed_ips dạng 10.66.66.xx/32
-        base_ip = "10.66.66"  # Phần IP cố định
-        existing_ips = [
-            int(peer['allowed_ips'].split('.')[3].split('/')[0])
-            for peer in db.all()
-            if 'allowed_ips' in peer and peer['allowed_ips'].startswith(base_ip)
-        ]
+    check = False
+    keys = get_conf_peer_key(config_name)
+    private_key=""
+    public_key=""
+    while not check:
+        key = gen_private_key()
+        private_key = key["private_key"]
+        public_key = key["public_key"]
+        if len(public_key) != 0 and public_key not in keys:
+            check = True
         
-        # Tìm IP tiếp theo
-        next_ip = max(existing_ips) + 1 if existing_ips else 2  # Bắt đầu từ .2
-        allowed_ips = f"{base_ip}.{next_ip}/32"
+            
+            
+    # 2. Tạo allowed_ips dạng 10.66.66.xx/32
+   
+    existing_ips = [
+    int(peer['allowed_ips'].split('.')[3].split('/')[0])
+    for peer in db.all()
+    if 'allowed_ips' in peer and peer['allowed_ips'].startswith(BASE_IP)
+    ]
+        
+    next_ip = max(existing_ips) + 1 if existing_ips else 2  
+    allowed_ips = f"{BASE_IP}.{next_ip}/32"
 
-        # 3. Kiểm tra IP trùng
-        if db.search(peers.allowed_ips == allowed_ips):
-            return jsonify({"error": "IP đã tồn tại"}), 409
-
-        # 4. Tạo config
-        config_content = f"""# {data['name']}
+    # 3. Kiểm tra IP trùng
+    if db.search(peers.allowed_ips == allowed_ips):
+        return jsonify({"error": "IP đã tồn tại"}), 409
+    try:
+        status = subprocess.check_output(
+            "wg set " + config_name + " peer " + public_key + " allowed-ips " + allowed_ips, shell=True,
+            stderr=subprocess.STDOUT)
+        status = subprocess.check_output("wg-quick save " + config_name, shell=True, stderr=subprocess.STDOUT)
+        get_all_peers_data(config_name)
+        db.update({"name": data['name'], "private_key": private_key, "DNS": DEFAULT_DNS,
+                   "endpoint_allowed_ip": DEFAULT_ENDPOINT_ALLOWED_IP},
+                  peers.id == public_key)
+        db.close()
+    except subprocess.CalledProcessError as exc:
+        db.close()
+        return exc.output.strip()
+    
+    public_key = get_conf_pub_key(config_name)
+    listen_port = get_conf_listen_port(config_name)
+    endpoint = config.get("Peers","remote_endpoint") + ":" + listen_port
+    filename = data["name"]
+    if len(filename) == 0:
+        filename = "Untitled_Peers"
+    else:
+        filename = data["name"]
+                # Clean filename
+        illegal_filename = [".", ",", "/", "?", "<", ">", "\\", ":", "*", '|' '\"', "com1", "com2", "com3",
+                        "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4",
+                    "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "con", "nul", "prn"]
+        for i in illegal_filename:
+            filename = filename.replace(i, "")
+        if len(filename) == 0:
+            filename = "Untitled_Peer"
+        filename = "".join(filename.split(' '))
+        filename = filename + "_" + config_name
+    # 4. Tạo config
+    config_content = f"""# {data['name']}
             [Interface]
             PrivateKey = {private_key}
             Address = {allowed_ips}
-            DNS = {data['DNS']}
+            DNS = {DEFAULT_DNS}
 
             [Peer]
-            PublicKey = SERVER_PUBKEY_HERE
-            Endpoint = your.server.com:51820
+            PublicKey = {public_key}
+            Endpoint ={endpoint}
             AllowedIPs = 0.0.0.0/0
             PersistentKeepalive = {data.get('keep_alive', 25)}
             """
 
-        # 5. Lưu database
-        db.insert({
-            'name': data['name'],
-            'public_key': public_key,
-            'private_key': private_key,
-            'allowed_ips': allowed_ips,
-            'DNS': data['DNS'],
-            'created_at': datetime.now().isoformat()
-        })
 
         # 6. Trả về file config
-        response = make_response(config_content)
-        response.headers['Content-Disposition'] = \
+    response = make_response(config_content)
+    response.headers['Content-Disposition'] = \
             f'attachment; filename="{data["name"]}_wg.conf"'
-        return response
+    return response
 
-    except subprocess.CalledProcessError as e:
-        return jsonify({"error": f"Lỗi WireGuard: {e.output.decode()}"}), 500
-
-    finally:
-        db.close()
 
 """
 Dashboard Initialization
