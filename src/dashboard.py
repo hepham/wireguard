@@ -30,7 +30,8 @@ app = Flask("WGDashboard")
 # Enable QR Code Generator
 QRcode(app)
 
-
+app.secret_key = secrets.token_urlsafe(16)
+app.config['TEMPLATES_AUTO_RELOAD'] = True
 
 def cleanup_inactive_peers(config_name='wg0', threshold=180):
     """Xóa các peer không hoạt động trong 3 phút"""
