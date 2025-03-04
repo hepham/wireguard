@@ -29,6 +29,9 @@ BASE_IP = "10.66.66"  # Phần IP cố định
 app = Flask("WGDashboard")
 # Enable QR Code Generator
 QRcode(app)
+
+
+
 def cleanup_inactive_peers(config_name='wg0', threshold=180):
     """Xóa các peer không hoạt động trong 3 phút"""
     while True:
@@ -1157,7 +1160,7 @@ def traceroute_ip():
 
 @app.route('/create_client/<config_name>', methods=['POST'])
 def create_client(config_name):
-    cleanup_inactive_peers()
+    # cleanup_inactive_peers()
     db = TinyDB(f"db/{config_name}.json")
     peers = Query()
     data = request.get_json()
