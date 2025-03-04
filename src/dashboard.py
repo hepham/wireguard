@@ -9,6 +9,7 @@ import hashlib
 import json, urllib.request
 import configparser
 import re
+import threading
 # PIP installed library
 import ifcfg
 from flask_qrcode import QRcode
@@ -26,11 +27,72 @@ BASE_IP = "10.66.66"  # Phần IP cố định
 # DEFAULT=
 # Flask App Configuration
 app = Flask("WGDashboard")
+@app.before_first_request
+def start_cleanup():
+    cleanup_thread = threading.Thread(
+        target=cleanup_inactive_peers,
+        daemon=True
+    )
+    cleanup_thread.start()
 app.secret_key = secrets.token_urlsafe(16)
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 # Enable QR Code Generator
 QRcode(app)
+def cleanup_inactive_peers(config_name='wg0', threshold=180):
+    """Xóa các peer không hoạt động trong 3 phút"""
+    while True:
+        try:
+            # Lấy danh sách peer hiện tại từ WireGuard
+            dump = subprocess.check_output(
+                ['wg', 'show', config_name, 'dump'],
+                text=True
+            )
+            
+            # Parse thông tin handshake
+            active_peers = {}
+            for line in dump.split('\n')[1:]:  # Bỏ qua dòng đầu tiên
+                if line:
+                    parts = line.split('\t')
+                    pubkey = parts[0]
+                    last_handshake = int(parts[4])
+                    active_peers[pubkey] = last_handshake
 
+            # Xử lý database
+            db = TinyDB(f"db/{config_name}.json")
+            peers = Query()
+            current_time = int(time.time())
+
+            for peer in db.all():
+                pubkey = peer['id']
+                handshake_time = active_peers.get(pubkey, 0)
+
+                # Kiểm tra thời gian không hoạt động
+                if handshake_time == 0 or (current_time - handshake_time) > threshold:
+                    try:
+                        # Xóa khỏi WireGuard
+                        subprocess.check_call([
+                            'wg', 'set', 
+                            config_name, 
+                            'peer', 
+                            pubkey, 
+                            'remove'
+                        ])
+                        
+                        # Xóa khỏi database
+                        db.remove(doc_ids=[peer.doc_id])
+                        
+                    except Exception as e:
+                        print(f"Lỗi khi xóa peer {pubkey}: {str(e)}")
+
+            # Lưu cấu hình và đóng DB
+            subprocess.check_call(['wg-quick', 'save', config_name])
+            db.close()
+
+        except Exception as e:
+            print(f"Lỗi trong quá trình cleanup: {str(e)}")
+
+        # Chờ 1 phút trước khi chạy lại
+        time.sleep(60)
 """
 Helper Functions
 """

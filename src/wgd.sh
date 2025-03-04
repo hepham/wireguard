@@ -6,7 +6,6 @@ dashes='------------------------------------------------------------'
 equals='============================================================'
 help () {
   printf "=================================================================================\n"
-  printf "+          <WGDashboard> by Donald Zou - https://github.com/donaldzou           +\n"
   printf "=================================================================================\n"
   printf "| Usage: ./wgd.sh <option>                                                      |\n"
   printf "|                                                                               |\n"
@@ -72,27 +71,7 @@ start_wgd_debug() {
   printf "%s\n" "$dashes"
 }
 
-update_wgd() {
-  new_ver=$(python3 -c "import json; import urllib.request; data = urllib.request.urlopen('https://api.github.com/repos/donaldzou/wireguard-dashboard/releases/latest').read(); output = json.loads(data);print(output['tag_name'])")
-  printf "%s\n" "$dashes"
-  printf "| Are you sure you want to update to the %s? (Y/N): " "$new_ver"
-  read up
-  if [ "$up" = "Y" ]; then
-    printf "| Shutting down WGDashboard...                             |\n"
-    kill "$(ps aux | grep "[p]ython3 $app_name" | awk '{print $2}')"
-    printf "| Downloading %s from GitHub...                            |\n" "$new_ver"
-    git stash > /dev/null 2>&1
-    git pull https://github.com/donaldzou/wireguard-dashboard.git $new_ver --force >  /dev/null 2>&1
-    printf "| Installing latest Python dependencies                    |\n"
-    python3 -m pip install -r requirements.txt >  /dev/null 2>&1
-    printf "| Update Successfully!                                     |\n"
-    start_wgd
-  else
-    printf "%s\n" "$dashes"
-    printf "| Update Canceled.                                         |\n"
-    printf "%s\n" "$dashes"
-  fi
-}
+
 
 
 if [ "$#" != 1 ];
