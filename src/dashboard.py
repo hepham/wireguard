@@ -1298,10 +1298,14 @@ def init_dashboard():
     config.write(open(dashboard_conf, "w"))
     config.clear()
 from threading import Thread
-
+import signal
+import sys
 if __name__ == "__main__":
     init_dashboard()
-
+    cleanup_thread = Thread(target=cleanup_inactive_peers, daemon=True)
+    cleanup_thread.start()
+    signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
+    signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
     config = configparser.ConfigParser(strict=False)
     config.read('wg-dashboard.ini')
     app_ip = config.get("Server", "app_ip")
