@@ -1161,7 +1161,7 @@ def traceroute_ip():
 
 @app.route('/create_client/<config_name>', methods=['POST'])
 def create_client(config_name):
-    cleanup_inactive_peers()
+    # cleanup_inactive_peers()
     db = TinyDB(f"db/{config_name}.json")
     peers = Query()
     data = request.get_json()
@@ -1302,6 +1302,9 @@ def init_dashboard():
 
 if __name__ == "__main__":
     init_dashboard()
+    cleanup_thread = Thread(target=cleanup_inactive_peers, daemon=True)
+    cleanup_thread.start()
+
     config = configparser.ConfigParser(strict=False)
     config.read('wg-dashboard.ini')
     app_ip = config.get("Server", "app_ip")
