@@ -1161,7 +1161,7 @@ def traceroute_ip():
 
 @app.route('/create_client/<config_name>', methods=['POST'])
 def create_client(config_name):
-    # cleanup_inactive_peers()
+    cleanup_inactive_peers()
     db = TinyDB(f"db/{config_name}.json")
     peers = Query()
     data = request.get_json()
