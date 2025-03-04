@@ -1127,7 +1127,7 @@ def create_client(config_name):
     for peer in db.all()
     if 'allowed_ips' in peer and peer['allowed_ips'].startswith(BASE_IP)
     ]
-        
+    print("existing_ips:",existing_ips)
     next_ip = max(existing_ips) + 1 if existing_ips else 2  
     allowed_ips = f"{BASE_IP}.{next_ip}/32"
 
