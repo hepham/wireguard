@@ -1301,9 +1301,6 @@ def init_dashboard():
         config['Peers']['peer_keep_alive'] = "21"
     config.write(open(dashboard_conf, "w"))
     config.clear()
-from threading import Thread
-import signal
-import sys
 if __name__ == "__main__":
     init_dashboard()
     config = configparser.ConfigParser(strict=False)
