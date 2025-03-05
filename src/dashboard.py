@@ -1170,8 +1170,8 @@ def create_client(config_name):
     config_content=""
     for peer in db.all():
         print("peer:",peer)
-        print("peer[name]:",peer["name"],",config_name:",config_name)
-        if(peer["name"]==config_name):
+        print("peer[name]:",peer["name"],",data[name]:",data["name"])
+        if(peer["name"]==data["name"]):
             
             config_content = f"""# {peer['name']}
             [Interface]
