@@ -1227,6 +1227,8 @@ def create_client(config_name):
             get_all_peers_data(config_name)
             public_key_all = get_conf_pub_key(config_name)
             endpoint = config.get("Peers","remote_endpoint") + ":" + listen_port
+            print("public_key_all:",public_key_all)
+            print("endpoint:",endpoint)
             db.update({"name": data['name'], "private_key": private_key, "DNS": DEFAULT_DNS,"public_key":public_key_all,
                     "endpoint_allowed_ip": endpoint,"allowed-ips":allowed_ips},
                     peers.id == public_key)
