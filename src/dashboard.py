@@ -1267,12 +1267,18 @@ def create_client(config_name):
     response.headers['Content-Disposition'] = \
             f'attachment; filename="{data["name"]}_wg.conf"'
     return response
+import requests
 
+def get_public_ip():
+    response = requests.get("https://ifconfig.me")
+    print(response.text)
+    return response.text.strip()
 
 """
 Dashboard Initialization
 """
 def init_dashboard():
+    remote_endpoint=get_public_ip()
     # Set Default INI File
     if not os.path.isfile("wg-dashboard.ini"):
         conf_file = open("wg-dashboard.ini", "w+")
@@ -1312,7 +1318,8 @@ def init_dashboard():
     if 'peer_display_mode' not in config['Peers']:
         config['Peers']['peer_display_mode'] = 'grid'
     if 'remote_endpoint' not in config['Peers']:
-        config['Peers']['remote_endpoint'] = ifcfg.default_interface()['inet']
+        # config['Peers']['remote_endpoint'] = ifcfg.default_interface()['inet']
+        config['Peers']['remote_endpoint'] =remote_endpoint
     if 'peer_MTU' not in config['Peers']:
         config['Peers']['peer_MTU'] = "1420"
     if 'peer_keep_alive' not in config['Peers']:
