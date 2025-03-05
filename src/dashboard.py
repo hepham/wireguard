@@ -1225,8 +1225,10 @@ def create_client(config_name):
                 stderr=subprocess.STDOUT)
             status = subprocess.check_output("wg-quick save " + config_name, shell=True, stderr=subprocess.STDOUT)
             get_all_peers_data(config_name)
-            db.update({"name": data['name'], "private_key": private_key, "DNS": DEFAULT_DNS,"public_key":public_key,
-                    "endpoint_allowed_ip": DEFAULT_ENDPOINT_ALLOWED_IP,"allowed-ips":allowed_ips},
+            public_key_all = get_conf_pub_key(config_name)
+            endpoint = config.get("Peers","remote_endpoint") + ":" + listen_port
+            db.update({"name": data['name'], "private_key": private_key, "DNS": DEFAULT_DNS,"public_key":public_key_all,
+                    "endpoint_allowed_ip": endpoint,"allowed-ips":allowed_ips},
                     peers.id == public_key)
             db.close()
         except subprocess.CalledProcessError as exc:
