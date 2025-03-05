@@ -1279,6 +1279,7 @@ Dashboard Initialization
 """
 def init_dashboard():
     remote_endpoint=get_public_ip()
+    print("remote_endpoint:",remote_endpoint)
     # Set Default INI File
     if not os.path.isfile("wg-dashboard.ini"):
         conf_file = open("wg-dashboard.ini", "w+")
