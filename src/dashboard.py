@@ -532,7 +532,7 @@ Flask Functions
 """
 
 # Before request
-@app.before_request
+# @app.before_request
 def auth_req():
     conf = configparser.ConfigParser(strict=False)
     conf.read(dashboard_conf)
