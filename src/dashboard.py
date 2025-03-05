@@ -1176,7 +1176,7 @@ def create_client(config_name):
             config_content = f"""# {peer['name']}
             [Interface]
             PrivateKey = {peer['private_key']}
-            Address = {peer['allowed_ips']}
+            Address = {peer['allowed_ip']}
             DNS = {DEFAULT_DNS}
 
             [Peer]
