@@ -1225,22 +1225,22 @@ def create_client(config_name):
                 stderr=subprocess.STDOUT)
             status = subprocess.check_output("wg-quick save " + config_name, shell=True, stderr=subprocess.STDOUT)
             get_all_peers_data(config_name)
-            public_key_all = get_conf_pub_key(config_name)
-            endpoint = config.get("Peers","remote_endpoint") + ":" + listen_port
-            print("public_key_all:",public_key_all)
-            print("endpoint:",endpoint)
-            db.update({"name": data['name'], "private_key": private_key, "DNS": DEFAULT_DNS,"public_key":public_key_all,
-                    "endpoint_allowed_ip": endpoint,"allowed-ips":allowed_ips},
-                    peers.id == public_key)
-            db.close()
+
         except subprocess.CalledProcessError as exc:
-            db.close()
             return exc.output.strip()
         
+        public_key_ip = public_key
         public_key = get_conf_pub_key(config_name)
         listen_port = get_conf_listen_port(config_name)
         config = get_dashboard_conf()
         endpoint = config.get("Peers","remote_endpoint") + ":" + listen_port
+        try:
+            db.update({"name": data['name'], "private_key": private_key, "DNS": DEFAULT_DNS,"public_key":public_key,
+            "endpoint_allowed_ip": endpoint,"allowed-ips":allowed_ips},
+            peers.id == public_key_ip)
+            db.close()
+        except subprocess.CalledProcessError as exc:
+            db.close()
         filename = data["name"]
         if len(filename) == 0:
             filename = "Untitled_Peers"
