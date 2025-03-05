@@ -1195,9 +1195,7 @@ def create_client(config_name):
             if len(public_key) != 0 and public_key not in keys:
                 check = True
         
-            
-            # "name": data['name'], "private_key": private_key, "DNS": DEFAULT_DNS,
-            #        "endpoint_allowed_ip": DEFAULT_ENDPOINT_ALLOWED_IP},
+
     # 2. Tạo allowed_ips dạng 10.66.66.xx/32
     
         existing_ips = [
@@ -1205,13 +1203,15 @@ def create_client(config_name):
         for peer in db.all()
         if 'allowed_ips' in peer and peer['allowed_ips'].startswith(BASE_IP)
         ]
-        print("existing_ips:",existing_ips)
+        
         next_ip=2
         for ip in range(2,255,1):
             if ip not in existing_ips:
                 next_ip =ip
                 break
         allowed_ips = f"{BASE_IP}.{next_ip}/32"
+        print("existing_ips:",existing_ips)
+        print("ip allowed_ip:",allowed_ips)
 
         # 3. Kiểm tra IP trùng
         if db.search(peers.allowed_ips == allowed_ips):
