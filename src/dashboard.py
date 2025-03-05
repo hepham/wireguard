@@ -1199,7 +1199,7 @@ def create_client(config_name):
     # 2. Tạo allowed_ips dạng 10.66.66.xx/32
     
         existing_ips = [
-        int(peer['allowed_ips'].split('.')[3].split('/')[0])
+        int(peer['allowed_ip'].split('.')[3].split('/')[0])
         for peer in db.all()
         if 'allowed_ip' in peer and peer['allowed_ip'].startswith(BASE_IP)
         ]
