@@ -34,8 +34,7 @@ app.secret_key = secrets.token_urlsafe(16)
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 
 def cleanup_inactive_peers(config_name='wg0', threshold=180):
-    """Xóa các peer không hoạt động trong 3 phút"""
-    while True:
+        """Xóa các peer không hoạt động trong 3 phút"""
         try:
             # Lấy danh sách peer hiện tại từ WireGuard
             dump = subprocess.check_output(
@@ -86,8 +85,6 @@ def cleanup_inactive_peers(config_name='wg0', threshold=180):
         except Exception as e:
             print(f"Lỗi trong quá trình cleanup: {str(e)}")
 
-        # Chờ 1 phút trước khi chạy lại
-        time.sleep(60)
 """
 Helper Functions
 """
