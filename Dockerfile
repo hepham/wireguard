@@ -10,7 +10,7 @@ RUN apt install -y apt-utils python3.8 python3-pip gcc libffi-dev python-dev def
 RUN wg genkey | sudo tee /etc/wireguard/privatekey | wg pubkey | sudo tee /etc/wireguard/publickey
 
 # python installs
-RUN pip3 install Flask tinydb ifcfg icmplib flask-qrcode
+RUN pip3 install Flask tinydb ifcfg icmplib flask-qrcode requests
 
 # make home directory
 RUN mkdir /home/app 

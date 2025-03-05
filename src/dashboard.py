@@ -76,14 +76,14 @@ def cleanup_inactive_peers(config_name='wg0', threshold=180):
                         db.remove(doc_ids=[peer.doc_id])
                         
                     except Exception as e:
-                        print(f"Lỗi khi xóa peer {pubkey}: {str(e)}")
+                        print(f"error delete peer {pubkey}: {str(e)}")
 
             # Lưu cấu hình và đóng DB
             subprocess.check_call(['wg-quick', 'save', config_name])
             db.close()
 
         except Exception as e:
-            print(f"Lỗi trong quá trình cleanup: {str(e)}")
+            print(f"error cleanup: {str(e)}")
 
 """
 Helper Functions
