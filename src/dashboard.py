@@ -1174,72 +1174,92 @@ def create_client(config_name):
             check = True
         
             
-            
+            # "name": data['name'], "private_key": private_key, "DNS": DEFAULT_DNS,
+            #        "endpoint_allowed_ip": DEFAULT_ENDPOINT_ALLOWED_IP},
     # 2. Tạo allowed_ips dạng 10.66.66.xx/32
+    check=False
+    config_content=""
     for peer in db.all():
         print("peer:",peer)
-    existing_ips = [
-    int(peer['allowed_ips'].split('.')[3].split('/')[0])
-    for peer in db.all()
-    if 'allowed_ips' in peer and peer['allowed_ips'].startswith(BASE_IP)
-    ]
-    print("existing_ips:",existing_ips)
-    next_ip=2
-    for ip in range(2,255,1):
-        if ip not in existing_ips:
-            next_ip =ip
-            break
-    allowed_ips = f"{BASE_IP}.{next_ip}/32"
-
-    # 3. Kiểm tra IP trùng
-    if db.search(peers.allowed_ips == allowed_ips):
-        return jsonify({"error": "IP đã tồn tại"}), 409
-    try:
-        status = subprocess.check_output(
-            "wg set " + config_name + " peer " + public_key + " allowed-ips " + allowed_ips, shell=True,
-            stderr=subprocess.STDOUT)
-        status = subprocess.check_output("wg-quick save " + config_name, shell=True, stderr=subprocess.STDOUT)
-        get_all_peers_data(config_name)
-        db.update({"name": data['name'], "private_key": private_key, "DNS": DEFAULT_DNS,
-                   "endpoint_allowed_ip": DEFAULT_ENDPOINT_ALLOWED_IP},
-                  peers.id == public_key)
-        db.close()
-    except subprocess.CalledProcessError as exc:
-        db.close()
-        return exc.output.strip()
-    
-    public_key = get_conf_pub_key(config_name)
-    listen_port = get_conf_listen_port(config_name)
-    config = get_dashboard_conf()
-    endpoint = config.get("Peers","remote_endpoint") + ":" + listen_port
-    filename = data["name"]
-    if len(filename) == 0:
-        filename = "Untitled_Peers"
-    else:
-        filename = data["name"]
-                # Clean filename
-        illegal_filename = [".", ",", "/", "?", "<", ">", "\\", ":", "*", '|' '\"', "com1", "com2", "com3",
-                        "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4",
-                    "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "con", "nul", "prn"]
-        for i in illegal_filename:
-            filename = filename.replace(i, "")
-        if len(filename) == 0:
-            filename = "Untitled_Peer"
-        filename = "".join(filename.split(' '))
-        filename = filename + "_" + config_name
-    # 4. Tạo config
-    config_content = f"""# {data['name']}
+        if(peer["name"]==config_name):
+            
+            config_content = f"""# {peer['name']}
             [Interface]
-            PrivateKey = {private_key}
-            Address = {allowed_ips}
+            PrivateKey = {peer['private_key']}
+            Address = {peer['allowed_ips']}
             DNS = {DEFAULT_DNS}
 
             [Peer]
-            PublicKey = {public_key}
-            Endpoint ={endpoint}
+            PublicKey = {peer['public_key']}
+            Endpoint ={peer['endpoint_allowed_ip']}
             AllowedIPs = 0.0.0.0/0
-            PersistentKeepalive = {data.get('keep_alive', 25)}
+            PersistentKeepalive = {data.get('keep_alive', 21)}
             """
+            check=True
+            break
+    if not check:
+        existing_ips = [
+        int(peer['allowed_ips'].split('.')[3].split('/')[0])
+        for peer in db.all()
+        if 'allowed_ips' in peer and peer['allowed_ips'].startswith(BASE_IP)
+        ]
+        print("existing_ips:",existing_ips)
+        next_ip=2
+        for ip in range(2,255,1):
+            if ip not in existing_ips:
+                next_ip =ip
+                break
+        allowed_ips = f"{BASE_IP}.{next_ip}/32"
+
+        # 3. Kiểm tra IP trùng
+        if db.search(peers.allowed_ips == allowed_ips):
+            return jsonify({"error": "IP đã tồn tại"}), 409
+        try:
+            status = subprocess.check_output(
+                "wg set " + config_name + " peer " + public_key + " allowed-ips " + allowed_ips, shell=True,
+                stderr=subprocess.STDOUT)
+            status = subprocess.check_output("wg-quick save " + config_name, shell=True, stderr=subprocess.STDOUT)
+            get_all_peers_data(config_name)
+            db.update({"name": data['name'], "private_key": private_key, "DNS": DEFAULT_DNS,
+                    "endpoint_allowed_ip": DEFAULT_ENDPOINT_ALLOWED_IP,"allowed-ips":allowed_ips},
+                    peers.id == public_key)
+            db.close()
+        except subprocess.CalledProcessError as exc:
+            db.close()
+            return exc.output.strip()
+        
+        public_key = get_conf_pub_key(config_name)
+        listen_port = get_conf_listen_port(config_name)
+        config = get_dashboard_conf()
+        endpoint = config.get("Peers","remote_endpoint") + ":" + listen_port
+        filename = data["name"]
+        if len(filename) == 0:
+            filename = "Untitled_Peers"
+        else:
+            filename = data["name"]
+                    # Clean filename
+            illegal_filename = [".", ",", "/", "?", "<", ">", "\\", ":", "*", '|' '\"', "com1", "com2", "com3",
+                            "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4",
+                        "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "con", "nul", "prn"]
+            for i in illegal_filename:
+                filename = filename.replace(i, "")
+            if len(filename) == 0:
+                filename = "Untitled_Peer"
+            filename = "".join(filename.split(' '))
+            filename = filename + "_" + config_name
+        # 4. Tạo config
+        config_content = f"""# {data['name']}
+                [Interface]
+                PrivateKey = {private_key}
+                Address = {allowed_ips}
+                DNS = {DEFAULT_DNS}
+
+                [Peer]
+                PublicKey = {public_key}
+                Endpoint ={endpoint}
+                AllowedIPs = 0.0.0.0/0
+                PersistentKeepalive = {data.get('keep_alive', 25)}
+                """
 
 
         # 6. Trả về file config
