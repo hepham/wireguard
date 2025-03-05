@@ -1186,7 +1186,11 @@ def create_client(config_name):
     if 'allowed_ips' in peer and peer['allowed_ips'].startswith(BASE_IP)
     ]
     print("existing_ips:",existing_ips)
-    next_ip = max(existing_ips) + 1 if existing_ips else 2  
+    next_ip=2
+    for ip in range(2,255,1):
+        if ip not in existing_ips:
+            next_ip =ip
+            break
     allowed_ips = f"{BASE_IP}.{next_ip}/32"
 
     # 3. Kiểm tra IP trùng
