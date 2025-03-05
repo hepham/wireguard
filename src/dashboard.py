@@ -1210,8 +1210,10 @@ def create_client(config_name):
                 next_ip =ip
                 break
         allowed_ips = f"{BASE_IP}.{next_ip}/32"
+        print("--------------------------------")
         print("existing_ips:",existing_ips)
         print("ip allowed_ip:",allowed_ips)
+        print("------------------------------")
 
         # 3. Kiểm tra IP trùng
         if db.search(peers.allowed_ips == allowed_ips):
