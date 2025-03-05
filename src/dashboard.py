@@ -1162,22 +1162,11 @@ def create_client(config_name):
     db = TinyDB(f"db/{config_name}.json")
     peers = Query()
     data = request.get_json()
-    check = False
+    
     keys = get_conf_peer_key(config_name)
     private_key=""
     public_key=""
-    while not check:
-        key = gen_private_key()
-        private_key = key["private_key"]
-        public_key = key["public_key"]
-        if len(public_key) != 0 and public_key not in keys:
-            check = True
-        
-            
-            # "name": data['name'], "private_key": private_key, "DNS": DEFAULT_DNS,
-            #        "endpoint_allowed_ip": DEFAULT_ENDPOINT_ALLOWED_IP},
-    # 2. Tạo allowed_ips dạng 10.66.66.xx/32
-    check=False
+    checkExist=False
     config_content=""
     for peer in db.all():
         print("peer:",peer)
@@ -1195,9 +1184,22 @@ def create_client(config_name):
             AllowedIPs = 0.0.0.0/0
             PersistentKeepalive = {data.get('keep_alive', 21)}
             """
-            check=True
+            checkExist=True
             break
-    if not check:
+    if not checkExist:
+        check = False
+        while not check:
+            key = gen_private_key()
+            private_key = key["private_key"]
+            public_key = key["public_key"]
+            if len(public_key) != 0 and public_key not in keys:
+                check = True
+        
+            
+            # "name": data['name'], "private_key": private_key, "DNS": DEFAULT_DNS,
+            #        "endpoint_allowed_ip": DEFAULT_ENDPOINT_ALLOWED_IP},
+    # 2. Tạo allowed_ips dạng 10.66.66.xx/32
+    
         existing_ips = [
         int(peer['allowed_ips'].split('.')[3].split('/')[0])
         for peer in db.all()
