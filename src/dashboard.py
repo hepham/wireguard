@@ -1201,7 +1201,7 @@ def create_client(config_name):
         existing_ips = [
         int(peer['allowed_ips'].split('.')[3].split('/')[0])
         for peer in db.all()
-        if 'allowed_ips' in peer and peer['allowed_ip'].startswith(BASE_IP)
+        if 'allowed_ip' in peer and peer['allowed_ip'].startswith(BASE_IP)
         ]
         
         next_ip=2
