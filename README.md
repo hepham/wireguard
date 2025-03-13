@@ -5,42 +5,54 @@ A containerized Wireguard VPN server with web dashboard for easy configuration a
 ## Features
 
 - Easy-to-use web dashboard for managing Wireguard VPN
-- Docker containerized for simple deployment
 - Client configuration via QR codes
 - User management interface
 - Traffic statistics and monitoring
 
 ## Requirements
 
-- Docker and Docker Compose
 - Ubuntu/Debian (recommended) or other Linux distribution
 - Open ports: 51820/udp (Wireguard) and 10086/tcp (Dashboard)
 
 ## Quick Start
 
-### 1. Install Docker and Docker Compose (Ubuntu)
 
 If you don't have Docker installed, use the provided script:
 
-```bash
-sudo chmod +x install_docker_ubuntu.sh
-sudo ./install_docker_ubuntu.sh
-```
 
-### 2. Clone the repository
+### 1. Clone the repository
 
 ```bash
 git clone https://github.com/hepham/wireguard.git
-cd wireguard
+cd wireguard-dashboard/src
 ```
+### 2. Install wireguard
+```bash
+sudo chmod +x wireguard-install.sh
+sudo ./wireguard-install.sh
+```
+Set port 51820 other default config.
 
-### 3. Start the Wireguard VPN server
+### 3. Install WGDashboard
 
 ```bash
-docker-compose up -d
+sudo chmod u+x wgd.sh
+sudo ./wgd.sh install
 ```
 
-### 4. Access the dashboard
+### 4. Configure permissions for WireGuard
+
+Give read and execute permission to the root of the WireGuard configuration folder. You can change the path if your configuration files are not stored in `/etc/wireguard`.
+
+```bash
+sudo chmod -R 755 /etc/wireguard
+```
+
+### 5. Run WGDashboard
+
+```bash
+./wgd.sh start
+```
 
 Open your browser and navigate to:
 ```
@@ -81,20 +93,10 @@ wireguard/
 ### Stop the server
 
 ```bash
-docker-compose down
+./wgd.sh stop
 ```
 
-### View logs
 
-```bash
-docker-compose logs -f
-```
-
-### Restart the server
-
-```bash
-docker-compose restart
-```
 
 ## Troubleshooting
 
@@ -117,6 +119,3 @@ docker-compose restart
 - Configure firewall rules to limit access to the dashboard
 - Regularly update the container: `docker-compose pull && docker-compose up -d`
 
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
