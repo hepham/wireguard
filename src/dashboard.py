@@ -148,6 +148,27 @@ def get_all_peers_from_redis(config_name):
         print(f"Error getting peers from Redis: {str(e)}")
         return []
 
+def get_peer_from_redis(config_name, peer_id):
+    """Get a single peer's data from Redis"""
+    r = get_redis_client()
+    if not r:
+        return None
+        
+    try:
+        # Get peer data
+        peer_key = get_peer_key(config_name, peer_id)
+        peer_data = r.hgetall(peer_key)
+        
+        if not peer_data:
+            return None
+            
+        # Add ID to the data
+        peer_data['id'] = peer_id
+        return peer_data
+    except Exception as e:
+        print(f"Error getting peer from Redis: {str(e)}")
+        return None
+
 def delete_peer_from_redis(config_name, peer_id):
     """Delete a peer from Redis"""
     r = get_redis_client()
