@@ -13,10 +13,9 @@ import threading
 # PIP installed library
 import ifcfg
 from flask_qrcode import QRcode
-from tinydb import TinyDB, Query
+# Thay thế TinyDB bằng sqlite3
+import sqlite3
 from icmplib import ping, multiping, traceroute, resolve, Host, Hop
-import fcntl
-import contextlib
 # Dashboard Version
 dashboard_version = 'v2.3.1'
 # Dashboard Config Name
@@ -35,110 +34,108 @@ QRcode(app)
 app.secret_key = secrets.token_urlsafe(16)
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 
-# Database lock
-db_locks = {}
+# SQLite Utility Functions
+def get_db_path(config_name):
+    """Trả về đường dẫn đến file database SQLite"""
+    db_dir = "db"
+    # Đảm bảo thư mục tồn tại
+    if not os.path.exists(db_dir):
+        os.makedirs(db_dir)
+    return os.path.join(db_dir, f"{config_name}.db")
 
-class DatabaseManager:
-    """
-    A context manager for safely handling TinyDB database operations with file locking
-    to prevent concurrent access issues and database corruption.
-    """
-    def __init__(self, db_path):
-        self.db_path = db_path
-        self.db = None
-        self.lock_file = f"{db_path}.lock"
-        self.lock_fd = None
+def init_db_for_config(config_name):
+    """Khởi tạo database SQLite cho một config nếu chưa tồn tại"""
+    db_path = get_db_path(config_name)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    # Tạo bảng peers nếu chưa tồn tại
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS peers (
+        id TEXT PRIMARY KEY,
+        name TEXT DEFAULT '',
+        private_key TEXT DEFAULT '',
+        DNS TEXT,
+        endpoint_allowed_ip TEXT,
+        allowed_ip TEXT DEFAULT 'N/A',
+        status TEXT DEFAULT 'stopped',
+        latest_handshake TEXT DEFAULT 'N/A',
+        endpoint TEXT DEFAULT 'N/A',
+        total_receive REAL DEFAULT 0,
+        total_sent REAL DEFAULT 0,
+        total_data REAL DEFAULT 0,
+        mtu TEXT,
+        keepalive TEXT,
+        remote_endpoint TEXT,
+        public_key TEXT DEFAULT '',
+        traffic TEXT DEFAULT '[]'
+    )
+    ''')
+    conn.commit()
+    conn.close()
 
-    def __enter__(self):
-        # Ensure directory exists
-        db_dir = os.path.dirname(self.db_path)
-        if db_dir and not os.path.exists(db_dir):
-            os.makedirs(db_dir)
-            
-        # Create lock file if it doesn't exist
-        if not os.path.exists(self.lock_file):
-            open(self.lock_file, 'w').close()
-            
-        # Acquire lock
-        self.lock_fd = open(self.lock_file, 'r+')
-        try:
-            fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except IOError:
-            # If we can't get the lock, wait for it
-            fcntl.flock(self.lock_fd, fcntl.LOCK_EX)
-        
-        # Check if database file exists and is valid
-        try:
-            if os.path.exists(self.db_path):
-                with open(self.db_path, 'r') as f:
-                    json.load(f)  # Validate JSON
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"Detected corrupted database file {self.db_path}, creating new one: {str(e)}")
-            with open(self.db_path, 'w') as f:
-                f.write('{}')
-                
-        # Open database
-        self.db = TinyDB(self.db_path)
-        return self.db
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.db:
-            self.db.close()
-        if self.lock_fd:
-            fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
-            self.lock_fd.close()
+def dict_factory(cursor, row):
+    """Chuyển đổi row thành dictionary để tương thích với TinyDB"""
+    d = {}
+    for idx, col in enumerate(cursor.description):
+        d[col[0]] = row[idx]
+    return d
 
 def cleanup_inactive_peers(config_name='wg0', threshold=180):
-        """Xóa các peer không hoạt động trong 3 phút"""
-        try:
-            # Lấy danh sách peer hiện tại từ WireGuard
-            dump = subprocess.check_output(
-                ['wg', 'show', config_name, 'dump'],
-                text=True
-            )
-            
-            # Parse thông tin handshake
-            active_peers = {}
-            for line in dump.split('\n')[1:]:  # Bỏ qua dòng đầu tiên
-                if line:
-                    parts = line.split('\t')
-                    pubkey = parts[0]
-                    last_handshake = int(parts[4])
-                    active_peers[pubkey] = last_handshake
+    """Xóa các peer không hoạt động trong 3 phút"""
+    try:
+        # Lấy danh sách peer hiện tại từ WireGuard
+        dump = subprocess.check_output(
+            ['wg', 'show', config_name, 'dump'],
+            text=True
+        )
+        
+        # Parse thông tin handshake
+        active_peers = {}
+        for line in dump.split('\n')[1:]:  # Bỏ qua dòng đầu tiên
+            if line:
+                parts = line.split('\t')
+                pubkey = parts[0]
+                last_handshake = int(parts[4])
+                active_peers[pubkey] = last_handshake
 
-            # Xử lý database
-            db_path = f"db/{config_name}.json"
-            with DatabaseManager(db_path) as db:
-                peers = Query()
-                current_time = int(time.time())
+        # Xử lý database
+        db_path = get_db_path(config_name)
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        current_time = int(time.time())
 
-                for peer in db.all():
-                    pubkey = peer['id']
-                    handshake_time = active_peers.get(pubkey, 0)
+        # Lấy tất cả các peers
+        cursor.execute("SELECT id, doc_id FROM peers")
+        all_peers = cursor.fetchall()
 
-                    # Kiểm tra thời gian không hoạt động
-                    if handshake_time == 0 or (current_time - handshake_time) > threshold:
-                        try:
-                            # Xóa khỏi WireGuard
-                            subprocess.check_call([
-                                'wg', 'set', 
-                                config_name, 
-                                'peer', 
-                                pubkey, 
-                                'remove'
-                            ])
-                            
-                            # Xóa khỏi database
-                            db.remove(doc_ids=[peer.doc_id])
-                            
-                        except Exception as e:
-                            print(f"error delete peer {pubkey}: {str(e)}")
+        for peer_id, doc_id in all_peers:
+            handshake_time = active_peers.get(peer_id, 0)
 
-            # Lưu cấu hình
-            subprocess.check_call(['wg-quick', 'save', config_name])
+            # Kiểm tra thời gian không hoạt động
+            if handshake_time == 0 or (current_time - handshake_time) > threshold:
+                try:
+                    # Xóa khỏi WireGuard
+                    subprocess.check_call([
+                        'wg', 'set', 
+                        config_name, 
+                        'peer', 
+                        peer_id, 
+                        'remove'
+                    ])
+                    
+                    # Xóa khỏi database
+                    cursor.execute("DELETE FROM peers WHERE id = ?", (peer_id,))
+                    
+                except Exception as e:
+                    print(f"error delete peer {peer_id}: {str(e)}")
 
-        except Exception as e:
-            print(f"error cleanup: {str(e)}")
+        # Lưu cấu hình và đóng DB
+        subprocess.check_call(['wg-quick', 'save', config_name])
+        conn.commit()
+        conn.close()
+
+    except Exception as e:
+        print(f"error cleanup: {str(e)}")
 
 """
 Helper Functions
@@ -288,7 +285,7 @@ def read_conf_file(config_name):
     return conf_peer_data
 
 # Get latest handshake from all peers of a configuration
-def get_latest_handshake(config_name, db, peers):
+def get_latest_handshake(config_name, conn, cursor):
     # Get latest handshakes
     try:
         data_usage = subprocess.check_output("wg show " + config_name + " latest-handshakes", shell=True)
@@ -305,14 +302,20 @@ def get_latest_handshake(config_name, db, peers):
         else:
             status = "stopped"
         if int(data_usage[count + 1]) > 0:
-            db.update({"latest_handshake": str(minus).split(".")[0], "status": status},
-                      peers.id == data_usage[count])
+            cursor.execute(
+                "UPDATE peers SET latest_handshake = ?, status = ? WHERE id = ?",
+                (str(minus).split(".")[0], status, data_usage[count])
+            )
         else:
-            db.update({"latest_handshake": "(None)", "status": status}, peers.id == data_usage[count])
+            cursor.execute(
+                "UPDATE peers SET latest_handshake = ?, status = ? WHERE id = ?",
+                ("(None)", status, data_usage[count])
+            )
         count += 2
+    conn.commit()
 
 # Get transfer from all peers of a configuration
-def get_transfer(config_name, db, peers):
+def get_transfer(config_name, conn, cursor):
     # Get transfer
     try:
         data_usage = subprocess.check_output("wg show " + config_name + " transfer", shell=True)
@@ -322,17 +325,28 @@ def get_transfer(config_name, db, peers):
     data_usage = data_usage.decode("UTF-8").split()
     count = 0
     for i in range(int(len(data_usage) / 3)):
-        cur_i = db.search(peers.id == data_usage[count])
+        cursor.execute("SELECT total_sent, total_receive, traffic, status FROM peers WHERE id = ?", (data_usage[count],))
+        cur_i = cursor.fetchone()
         
-        # Kiểm tra và khởi tạo giá trị mặc định
-        total_sent = cur_i[0].get('total_sent', 0)  # Sử dụng get để lấy giá trị hoặc 0 nếu không tồn tại
-        total_receive = cur_i[0].get('total_receive', 0)  # Tương tự cho total_receive
-        traffic = cur_i[0].get('traffic', [])  # Khởi tạo traffic là danh sách rỗng nếu không tồn tại
+        if not cur_i:
+            count += 3
+            continue
+            
+        # Lấy giá trị hoặc sử dụng giá trị mặc định
+        total_sent = cur_i[0] or 0
+        total_receive = cur_i[1] or 0
+        traffic_str = cur_i[2] or '[]'
+        status = cur_i[3]
+        
+        try:
+            traffic = json.loads(traffic_str)
+        except:
+            traffic = []
         
         cur_total_sent = round(int(data_usage[count + 2]) / (1024 ** 3), 4)
         cur_total_receive = round(int(data_usage[count + 1]) / (1024 ** 3), 4)
         
-        if cur_i[0]["status"] == "running":
+        if status == "running":
             if total_sent <= cur_total_sent and total_receive <= cur_total_receive:
                 total_sent = cur_total_sent
                 total_receive = cur_total_receive
@@ -348,17 +362,22 @@ def get_transfer(config_name, db, peers):
                 total_sent = 0
                 total_receive = 0
             
-            db.update({
-                "traffic": traffic,
-                "total_receive": round(total_receive, 4),
-                "total_sent": round(total_sent, 4),
-                "total_data": round(total_receive + total_sent, 4)
-            }, peers.id == data_usage[count])
+            cursor.execute(
+                "UPDATE peers SET traffic = ?, total_receive = ?, total_sent = ?, total_data = ? WHERE id = ?",
+                (
+                    json.dumps(traffic),
+                    round(total_receive, 4),
+                    round(total_sent, 4),
+                    round(total_receive + total_sent, 4),
+                    data_usage[count]
+                )
+            )
 
         count += 3
+    conn.commit()
 
 # Get endpoint from all peers of a configuration
-def get_endpoint(config_name, db, peers):
+def get_endpoint(config_name, conn, cursor):
     # Get endpoint
     try:
         data_usage = subprocess.check_output("wg show " + config_name + " endpoints", shell=True)
@@ -367,86 +386,108 @@ def get_endpoint(config_name, db, peers):
     data_usage = data_usage.decode("UTF-8").split()
     count = 0
     for i in range(int(len(data_usage) / 2)):
-        db.update({"endpoint": data_usage[count + 1]}, peers.id == data_usage[count])
+        cursor.execute(
+            "UPDATE peers SET endpoint = ? WHERE id = ?",
+            (data_usage[count + 1], data_usage[count])
+        )
         count += 2
+    conn.commit()
 
 # Get allowed ips from all peers of a configuration
-def get_allowed_ip(config_name, db, peers, conf_peer_data):
+def get_allowed_ip(config_name, conn, cursor, conf_peer_data):
     # Get allowed ip
     for i in conf_peer_data["Peers"]:
-        db.update({"allowed_ip": i.get('AllowedIPs', '(None)')}, peers.id == i["PublicKey"])
+        cursor.execute(
+            "UPDATE peers SET allowed_ip = ? WHERE id = ?",
+            (i.get('AllowedIPs', '(None)'), i["PublicKey"])
+        )
+    conn.commit()
 
-# Get all peers data from database with proper error handling and locking
+# Look for new peers from WireGuard
 def get_all_peers_data(config_name):
-    try:
-        # Đảm bảo thư mục db tồn tại
-        if not os.path.exists('db'):
-            os.makedirs('db')
+    # Đảm bảo database đã được khởi tạo
+    init_db_for_config(config_name)
+    
+    db_path = get_db_path(config_name)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    conf_peer_data = read_conf_file(config_name)
+    config = get_dashboard_conf()
+    
+    # Lấy danh sách peer hiện có trong database
+    cursor.execute("SELECT id FROM peers")
+    existing_peers = {row['id'] for row in cursor.fetchall()}
+    
+    for i in conf_peer_data['Peers']:
+        # Kiểm tra peer có tồn tại chưa
+        cursor.execute("SELECT COUNT(*) FROM peers WHERE id = ?", (i['PublicKey'],))
+        if cursor.fetchone()[0] == 0:
+            # Thêm peer mới
+            cursor.execute("""
+                INSERT INTO peers (
+                    id, private_key, DNS, endpoint_allowed_ip, name, 
+                    total_receive, total_sent, total_data, endpoint, 
+                    status, latest_handshake, allowed_ip, traffic, 
+                    mtu, keepalive, remote_endpoint
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                i['PublicKey'], "", config.get("Peers", "peer_global_DNS"),
+                config.get("Peers", "peer_endpoint_allowed_ip"), "", 
+                0, 0, 0, "N/A", "stopped", "N/A", "N/A", "[]",
+                config.get("Peers", "peer_mtu"), 
+                config.get("Peers", "peer_keep_alive"),
+                config.get("Peers", "remote_endpoint")
+            ))
+        else:
+            # Cập nhật peer nếu cần
+            cursor.execute("""
+                SELECT DNS, endpoint_allowed_ip, private_key, mtu, keepalive, remote_endpoint 
+                FROM peers WHERE id = ?
+            """, (i['PublicKey'],))
+            row = cursor.fetchone()
             
-        db_file = f'db/{config_name}.json'
-        
-        with DatabaseManager(db_file) as db:
-            peers = Query()
-            conf_peer_data = read_conf_file(config_name)
-            config = get_dashboard_conf()
-            for i in conf_peer_data['Peers']:
-                search = db.search(peers.id == i['PublicKey'])
-                if not search:
-                    db.insert({
-                        "id": i['PublicKey'],
-                        "private_key": "",
-                        "DNS": config.get("Peers", "peer_global_DNS"),
-                        "endpoint_allowed_ip": config.get("Peers","peer_endpoint_allowed_ip"),
-                        "name": "",
-                        "total_receive": 0,
-                        "total_sent": 0,
-                        "total_data": 0,
-                        "endpoint": "N/A",
-                        "status": "stopped",
-                        "latest_handshake": "N/A",
-                        "allowed_ip": "N/A",
-                        "traffic": [],
-                        "mtu": config.get("Peers", "peer_mtu"),
-                        "keepalive": config.get("Peers","peer_keep_alive"),
-                        "remote_endpoint":config.get("Peers","remote_endpoint")
-                    })
-                else:
-                    # Update database since V2.2
-                    update_db = {}
-                    # Required peer settings
-                    if "DNS" not in search[0]:
-                        update_db['DNS'] = config.get("Peers", "peer_global_DNS")
-                    if "endpoint_allowed_ip" not in search[0]:
-                        update_db['endpoint_allowed_ip'] = config.get("Peers", "peer_endpoint_allowed_ip")
-                    # Not required peers settings (Only for QR code)
-                    if "private_key" not in search[0]:
-                        update_db['private_key'] = ''
-                    if "mtu" not in search[0]:
-                        update_db['mtu'] = config.get("Peers", "peer_mtu")
-                    if "keepalive" not in search[0]:
-                        update_db['keepalive'] = config.get("Peers","peer_keep_alive")
-                    if "remote_endpoint" not in search[0]:
-                        update_db['remote_endpoint'] = config.get("Peers","remote_endpoint")
-                    db.update(update_db, peers.id == i['PublicKey'])
-            # Remove peers no longer exist in WireGuard configuration file
-            db_key = list(map(lambda a: a['id'], db.all()))
-            wg_key = list(map(lambda a: a['PublicKey'], conf_peer_data['Peers']))
-            for i in db_key:
-                if i not in wg_key:
-                    db.remove(peers.id == i)
-            tic = time.perf_counter()
-            get_latest_handshake(config_name, db, peers)
-            get_transfer(config_name, db, peers)
-            get_endpoint(config_name, db, peers)
-            get_allowed_ip(config_name, db, peers, conf_peer_data)
-            toc = time.perf_counter()
-            print(f"Finish fetching data in {toc - tic:0.4f} seconds")
-    except Exception as e:
-        print(f"Error in get_all_peers_data: {str(e)}")
-        # Create an empty database file if needed
-        if not os.path.exists(f'db/{config_name}.json'):
-            with open(f'db/{config_name}.json', 'w') as f:
-                f.write('{}')
+            # Cập nhật thiếu các thiết lập mặc định
+            update_fields = {}
+            if not row['DNS']:  # DNS
+                update_fields['DNS'] = config.get("Peers", "peer_global_DNS")
+            if not row['endpoint_allowed_ip']:  # endpoint_allowed_ip
+                update_fields['endpoint_allowed_ip'] = config.get("Peers", "peer_endpoint_allowed_ip")
+            if not row['private_key']:  # private_key
+                update_fields['private_key'] = ''
+            if not row['mtu']:  # mtu
+                update_fields['mtu'] = config.get("Peers", "peer_mtu")
+            if not row['keepalive']:  # keepalive
+                update_fields['keepalive'] = config.get("Peers", "peer_keep_alive")
+            if not row['remote_endpoint']:  # remote_endpoint
+                update_fields['remote_endpoint'] = config.get("Peers", "remote_endpoint")
+                
+            # Cập nhật nếu có thiếu thông tin
+            if update_fields:
+                set_clause = ", ".join([f"{key} = ?" for key in update_fields.keys()])
+                values = list(update_fields.values()) + [i['PublicKey']]
+                cursor.execute(f"UPDATE peers SET {set_clause} WHERE id = ?", values)
+    
+    # Lấy danh sách peer từ WireGuard
+    wg_keys = {peer['PublicKey'] for peer in conf_peer_data['Peers']}
+    
+    # Xóa peer không còn tồn tại trong WireGuard
+    for db_key in existing_peers:
+        if db_key not in wg_keys:
+            cursor.execute("DELETE FROM peers WHERE id = ?", (db_key,))
+    
+    # Đồng bộ thông tin
+    tic = time.perf_counter()
+    get_latest_handshake(config_name, conn, cursor)
+    get_transfer(config_name, conn, cursor)
+    get_endpoint(config_name, conn, cursor)
+    get_allowed_ip(config_name, conn, cursor, conf_peer_data)
+    toc = time.perf_counter()
+    print(f"Finish fetching data in {toc - tic:0.4f} seconds")
+    
+    conn.commit()
+    conn.close()
 
 """
 Frontend Related Functions
@@ -454,18 +495,69 @@ Frontend Related Functions
 # Search for peers
 def get_peers(config_name, search, sort_t):
     get_all_peers_data(config_name)
-    result = []
-    with DatabaseManager(f'db/{config_name}.json') as db:
-        peer = Query()
-        if len(search) == 0:
-            result = db.all()
-        else:
-            result = db.search(peer.name.matches('(.*)(' + re.escape(search) + ')(.*)'))
+    db_path = get_db_path(config_name)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    if len(search) == 0:
+        cursor.execute("SELECT * FROM peers")
+    else:
+        cursor.execute("SELECT * FROM peers WHERE name LIKE ?", (f'%{search}%',))
+        
+    result = cursor.fetchall()
+    
+    # Chuyển đổi traffic từ JSON string thành list
+    for row in result:
+        if 'traffic' in row and row['traffic']:
+            try:
+                row['traffic'] = json.loads(row['traffic'])
+            except:
+                row['traffic'] = []
+    
+    # Sắp xếp kết quả
+    if sort_t in result[0] if result else []:
         result = sorted(result, key=lambda d: d[sort_t])
+    
+    conn.close()
     return result
 
 
 
+
+# Get configuration total data
+def get_conf_total_data(config_name):
+    db_path = get_db_path(config_name)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    upload_total = 0
+    download_total = 0
+    
+    # Lấy tổng dữ liệu hiện tại
+    cursor.execute("SELECT total_sent, total_receive, traffic FROM peers")
+    peers = cursor.fetchall()
+    
+    for peer in peers:
+        upload_total += peer['total_sent'] or 0
+        download_total += peer['total_receive'] or 0
+        
+        if peer['traffic']:
+            try:
+                traffic = json.loads(peer['traffic'])
+                for k in traffic:
+                    upload_total += k['total_sent']
+                    download_total += k['total_receive']
+            except:
+                pass
+    
+    total = round(upload_total + download_total, 4)
+    upload_total = round(upload_total, 4)
+    download_total = round(download_total, 4)
+    
+    conn.close()
+    return [total, upload_total, download_total]
 
 # Get configuration public key
 def get_conf_pub_key(config_name):
@@ -489,24 +581,6 @@ def get_conf_listen_port(config_name):
             port = port.decode("UTF-8")
     conf.clear()
     return port
-
-# Get configuration total data
-def get_conf_total_data(config_name):
-    upload_total = 0
-    download_total = 0
-    
-    with DatabaseManager(f'db/{config_name}.json') as db:
-        for i in db.all():
-            upload_total += i.get('total_sent', 0)
-            download_total += i.get('total_receive', 0)
-            for k in i.get('traffic', []):
-                upload_total += k.get('total_sent', 0)
-                download_total += k.get('total_receive', 0)
-    
-    total = round(upload_total + download_total, 4)
-    upload_total = round(upload_total, 4)
-    download_total = round(download_total, 4)
-    return [total, upload_total, download_total]
 
 # Get configuration status
 def get_conf_status(config_name):
@@ -569,27 +643,40 @@ def checkKeyMatch(private_key, public_key, config_name):
     if result['status'] == 'failed':
         return result
     else:
-        with DatabaseManager(f'db/{config_name}.json') as db:
-            peers = Query()
-            match = db.search(peers.id == result['data'])
-            if len(match) != 1 or result['data'] != public_key:
-                return {'status': 'failed', 'msg': 'Please check your private key, it does not match with the public key.'}
-            else:
-                return {'status': 'success'}
+        db_path = get_db_path(config_name)
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COUNT(*) FROM peers WHERE id = ?", (public_key,))
+        match_count = cursor.fetchone()[0]
+        
+        conn.close()
+        
+        if match_count != 1 or result['data'] != public_key:
+            return {'status': 'failed', 'msg': 'Please check your private key, it does not match with the public key.'}
+        else:
+            return {'status': 'success'}
 
 # Check if there is repeated allowed IP
 def check_repeat_allowed_IP(public_key, ip, config_name):
-    with DatabaseManager(f"db/{config_name}.json") as db:
-        peers = Query()
-        peer = db.search(peers.id == public_key)
-        if len(peer) != 1:
-            return {'status': 'failed', 'msg': 'Peer does not exist'}
-        else:
-            existed_ip = db.search((peers.id != public_key) & (peers.allowed_ip == ip))
-            if len(existed_ip) != 0:
-                return {'status': 'failed', 'msg': "Allowed IP already taken by another peer."}
-            else:
-                return {'status': 'success'}
+    db_path = get_db_path(config_name)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # Kiểm tra peer tồn tại
+    cursor.execute("SELECT COUNT(*) FROM peers WHERE id = ?", (public_key,))
+    if cursor.fetchone()[0] != 1:
+        conn.close()
+        return {'status': 'failed', 'msg': 'Peer does not exist'}
+    
+    # Kiểm tra IP đã tồn tại
+    cursor.execute("SELECT COUNT(*) FROM peers WHERE id != ? AND allowed_ip = ?", (public_key, ip))
+    if cursor.fetchone()[0] > 0:
+        conn.close()
+        return {'status': 'failed', 'msg': "Allowed IP already taken by another peer."}
+    
+    conn.close()
+    return {'status': 'success'}
 
 
 """
@@ -945,34 +1032,111 @@ def switch(config_name):
 # Add peer
 @app.route('/add_peer/<config_name>', methods=['POST'])
 def add_peer(config_name):
+    db_path = get_db_path(config_name)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
     data = request.get_json()
-    return add_peer(config_name, data)
+    public_key = data['public_key']
+    allowed_ips = data['allowed_ips']
+    endpoint_allowed_ip = data['endpoint_allowed_ip']
+    DNS = data['DNS']
+    keys = get_conf_peer_key(config_name)
+    
+    if len(public_key) == 0 or len(DNS) == 0 or len(allowed_ips) == 0 or len(endpoint_allowed_ip) == 0:
+        conn.close()
+        return "Please fill in all required box."
+        
+    if type(keys) != list:
+        conn.close()
+        return config_name + " is not running."
+        
+    if public_key in keys:
+        conn.close()
+        return "Public key already exist."
+    
+    # Kiểm tra allowed IP đã tồn tại chưa
+    cursor.execute("SELECT COUNT(*) FROM peers WHERE allowed_ip = ?", (allowed_ips,))
+    if cursor.fetchone()[0] > 0:
+        conn.close()
+        return "Allowed IP already taken by another peer."
+    
+    if not check_DNS(DNS):
+        conn.close()
+        return "DNS formate is incorrect. Example: 1.1.1.1"
+        
+    if not check_Allowed_IPs(endpoint_allowed_ip):
+        conn.close()
+        return "Endpoint Allowed IPs format is incorrect."
+        
+    if len(data['MTU']) != 0:
+        try:
+            mtu = int(data['MTU'])
+        except:
+            conn.close()
+            return "MTU format is not correct."
+            
+    if len(data['keep_alive']) != 0:
+        try:
+            keep_alive = int(data['keep_alive'])
+        except:
+            conn.close()
+            return "Persistent Keepalive format is not correct."
+    
+    try:
+        status = subprocess.check_output(
+            "wg set " + config_name + " peer " + public_key + " allowed-ips " + allowed_ips, shell=True,
+            stderr=subprocess.STDOUT)
+        status = subprocess.check_output("wg-quick save " + config_name, shell=True, stderr=subprocess.STDOUT)
+        get_all_peers_data(config_name)
+        
+        # Update peer trong database
+        cursor.execute("""
+            UPDATE peers SET name = ?, private_key = ?, DNS = ?, endpoint_allowed_ip = ? 
+            WHERE id = ?
+        """, (data['name'], data['private_key'], data['DNS'], endpoint_allowed_ip, public_key))
+        
+        conn.commit()
+        conn.close()
+        return "true"
+    except subprocess.CalledProcessError as exc:
+        conn.close()
+        return exc.output.strip()
 
 # Remove peer
 @app.route('/remove_peer/<config_name>', methods=['POST'])
 def remove_peer(config_name):
     if get_conf_status(config_name) == "stopped":
         return "Your need to turn on " + config_name + " first."
+        
+    db_path = get_db_path(config_name)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
     
     data = request.get_json()
     delete_key = data['peer_id']
     keys = get_conf_peer_key(config_name)
     
     if type(keys) != list:
+        conn.close()
         return config_name + " is not running."
+        
     if delete_key not in keys:
+        conn.close()
         return "This key does not exist"
-    
-    try:
-        with DatabaseManager(f"db/{config_name}.json") as db:
-            peers = Query()
+    else:
+        try:
             status = subprocess.check_output("wg set " + config_name + " peer " + delete_key + " remove", shell=True,
-                                            stderr=subprocess.STDOUT)
+                                             stderr=subprocess.STDOUT)
             status = subprocess.check_output("wg-quick save " + config_name, shell=True, stderr=subprocess.STDOUT)
-            db.remove(peers.id == delete_key)
-        return "true"
-    except subprocess.CalledProcessError as exc:
-        return exc.output.strip()
+            
+            cursor.execute("DELETE FROM peers WHERE id = ?", (delete_key,))
+            conn.commit()
+            conn.close()
+            return "true"
+        except subprocess.CalledProcessError as exc:
+            conn.close()
+            return exc.output.strip()
 
 # Save peer settings
 @app.route('/save_peer_setting/<config_name>', methods=['POST'])
@@ -985,49 +1149,72 @@ def save_peer_setting(config_name):
     allowed_ip = data['allowed_ip']
     endpoint_allowed_ip = data['endpoint_allowed_ip']
     
-    with DatabaseManager(f"db/{config_name}.json") as db:
-        peers = Query()
-        if len(db.search(peers.id == id)) == 1:
-            check_ip = check_repeat_allowed_IP(id, allowed_ip, config_name)
-            if not check_IP_with_range(endpoint_allowed_ip):
-                return jsonify({"status": "failed", "msg": "Endpoint Allowed IPs format is incorrect."})
-            if not check_DNS(DNS):
-                return jsonify({"status": "failed", "msg": "DNS format is incorrect."})
-            if len(data['MTU']) != 0:
-                try:
-                    mtu = int(data['MTU'])
-                except:
-                    return jsonify({"status": "failed", "msg": "MTU format is not correct."})
-            if len(data['keep_alive']) != 0:
-                try:
-                    keep_alive = int(data['keep_alive'])
-                except:
-                    return jsonify({"status": "failed", "msg": "Persistent Keepalive format is not correct."})
-            if private_key != "":
-                check_key = checkKeyMatch(private_key, id, config_name)
-                if check_key['status'] == "failed":
-                    return jsonify(check_key)
-            if check_ip['status'] == "failed":
-                return jsonify(check_ip)
+    db_path = get_db_path(config_name)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # Kiểm tra peer tồn tại
+    cursor.execute("SELECT COUNT(*) FROM peers WHERE id = ?", (id,))
+    if cursor.fetchone()[0] == 1:
+        check_ip = check_repeat_allowed_IP(id, allowed_ip, config_name)
+        
+        if not check_IP_with_range(endpoint_allowed_ip):
+            conn.close()
+            return jsonify({"status": "failed", "msg": "Endpoint Allowed IPs format is incorrect."})
+            
+        if not check_DNS(DNS):
+            conn.close()
+            return jsonify({"status": "failed", "msg": "DNS format is incorrect."})
+            
+        if len(data['MTU']) != 0:
             try:
-                if allowed_ip == "": allowed_ip = '""'
-                change_ip = subprocess.check_output('wg set ' + config_name + " peer " + id + " allowed-ips " + allowed_ip,
-                                                    shell=True, stderr=subprocess.STDOUT)
-                save_change_ip = subprocess.check_output('wg-quick save ' + config_name, shell=True,
-                                                        stderr=subprocess.STDOUT)
-                if change_ip.decode("UTF-8") != "":
-                    return jsonify({"status": "failed", "msg": change_ip.decode("UTF-8")})
-                db.update(
-                    {"name": name, "private_key": private_key,
-                    "DNS": DNS, "endpoint_allowed_ip": endpoint_allowed_ip,
-                    "mtu": data['MTU'],
-                    "keepalive":data['keep_alive']},
-                    peers.id == id)
-                return jsonify({"status": "success", "msg": ""})
-            except subprocess.CalledProcessError as exc:
-                return jsonify({"status": "failed", "msg": str(exc.output.decode("UTF-8").strip())})
-        else:
-            return jsonify({"status": "failed", "msg": "This peer does not exist."})
+                mtu = int(data['MTU'])
+            except:
+                conn.close()
+                return jsonify({"status": "failed", "msg": "MTU format is not correct."})
+                
+        if len(data['keep_alive']) != 0:
+            try:
+                keep_alive = int(data['keep_alive'])
+            except:
+                conn.close()
+                return jsonify({"status": "failed", "msg": "Persistent Keepalive format is not correct."})
+                
+        if private_key != "":
+            check_key = checkKeyMatch(private_key, id, config_name)
+            if check_key['status'] == "failed":
+                conn.close()
+                return jsonify(check_key)
+                
+        if check_ip['status'] == "failed":
+            conn.close()
+            return jsonify(check_ip)
+            
+        try:
+            if allowed_ip == "": allowed_ip = '""'
+            change_ip = subprocess.check_output('wg set ' + config_name + " peer " + id + " allowed-ips " + allowed_ip,
+                                                shell=True, stderr=subprocess.STDOUT)
+            save_change_ip = subprocess.check_output('wg-quick save ' + config_name, shell=True,
+                                                     stderr=subprocess.STDOUT)
+                                                     
+            if change_ip.decode("UTF-8") != "":
+                conn.close()
+                return jsonify({"status": "failed", "msg": change_ip.decode("UTF-8")})
+                
+            cursor.execute("""
+                UPDATE peers SET name = ?, private_key = ?, DNS = ?, endpoint_allowed_ip = ?, mtu = ?, keepalive = ?
+                WHERE id = ?
+            """, (name, private_key, DNS, endpoint_allowed_ip, data['MTU'], data['keep_alive'], id))
+            
+            conn.commit()
+            conn.close()
+            return jsonify({"status": "success", "msg": ""})
+        except subprocess.CalledProcessError as exc:
+            conn.close()
+            return jsonify({"status": "failed", "msg": str(exc.output.decode("UTF-8").strip())})
+    else:
+        conn.close()
+        return jsonify({"status": "failed", "msg": "This peer does not exist."})
 
 # Get peer settings
 @app.route('/get_peer_data/<config_name>', methods=['POST'])
@@ -1035,23 +1222,23 @@ def get_peer_name(config_name):
     data = request.get_json()
     id = data['id']
     
-    with DatabaseManager(f"db/{config_name}.json") as db:
-        peers = Query()
-        result = db.search(peers.id == id)
-        
-        if not result:
-            return jsonify({"status": "failed", "msg": "Peer not found"})
-            
-        data = {
-            "name": result[0].get('name', ''),
-            "allowed_ip": result[0].get('allowed_ip', ''),
-            "DNS": result[0].get('DNS', ''),
-            "private_key": result[0].get('private_key', ''),
-            "endpoint_allowed_ip": result[0].get('endpoint_allowed_ip', ''),
-            "mtu": result[0].get('mtu', ''),
-            "keep_alive": result[0].get('keepalive', '')
-        }
-    return jsonify(data)
+    db_path = get_db_path(config_name)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        SELECT name, allowed_ip, DNS, private_key, endpoint_allowed_ip, mtu, keepalive 
+        FROM peers WHERE id = ?
+    """, (id,))
+    result = cursor.fetchone()
+    
+    conn.close()
+    
+    if result:
+        return jsonify(result)
+    else:
+        return jsonify({})
 
 # Generate a private key
 @app.route('/generate_peer', methods=['GET'])
@@ -1076,51 +1263,52 @@ def check_key_match(config_name):
 # Download configuration file
 @app.route('/download/<config_name>', methods=['GET'])
 def download(config_name):
+    print(request.headers.get('User-Agent'))
     id = request.args.get('id')
-    
-    with DatabaseManager(f"db/{config_name}.json") as db:
-        peers = Query()
-        get_peer = db.search(peers.id == id)
-        config = get_dashboard_conf()
-        if len(get_peer) == 1:
-            peer = get_peer[0]
-            if peer['private_key'] != "":
-                public_key = get_conf_pub_key(config_name)
-                listen_port = get_conf_listen_port(config_name)
-                endpoint = config.get("Peers","remote_endpoint") + ":" + listen_port
-                private_key = peer['private_key']
-                allowed_ip = peer['allowed_ip']
-                DNS = peer['DNS']
-                endpoint_allowed_ip = peer['endpoint_allowed_ip']
+    db = sqlite3.connect(get_db_path(config_name))
+    cursor = db.cursor()
+    get_peer = cursor.execute("SELECT * FROM peers WHERE id = ?", (id,)).fetchone()
+    config = get_dashboard_conf()
+    if len(get_peer) == 1:
+        peer = get_peer
+        if peer['private_key'] != "":
+            public_key = get_conf_pub_key(config_name)
+            listen_port = get_conf_listen_port(config_name)
+            endpoint = config.get("Peers","remote_endpoint") + ":" + listen_port
+            private_key = peer['private_key']
+            allowed_ip = peer['allowed_ip']
+            DNS = peer['DNS']
+            endpoint_allowed_ip = peer['endpoint_allowed_ip']
+            filename = peer['name']
+            if len(filename) == 0:
+                filename = "Untitled_Peers"
+            else:
                 filename = peer['name']
-                if len(filename) == 0:
-                    filename = "Untitled_Peers"
-                else:
-                    filename = peer['name']
-                    # Clean filename
-                    illegal_filename = [".", ",", "/", "?", "<", ">", "\\", ":", "*", '|' '\"', "com1", "com2", "com3",
-                                        "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4",
+                # Clean filename
+                illegal_filename = [".", ",", "/", "?", "<", ">", "\\", ":", "*", '|' '\"', "com1", "com2", "com3",
+                                    "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4",
                                     "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "con", "nul", "prn"]
-                    for i in illegal_filename:
-                        filename = filename.replace(i, "")
-                    if len(filename) == 0:
-                        filename = "Untitled_Peer"
-                    filename = "".join(filename.split(' '))
-                filename = filename + "_" + config_name
+                for i in illegal_filename:
+                    filename = filename.replace(i, "")
+                if len(filename) == 0:
+                    filename = "Untitled_Peer"
+                filename = "".join(filename.split(' '))
+            filename = filename + "_" + config_name
 
-                def generate(private_key, allowed_ip, DNS, public_key, endpoint):
-                    yield "[Interface]\nPrivateKey = " + private_key + "\nAddress = " + allowed_ip + "\nDNS = " + DNS + "\n\n[Peer]\nPublicKey = " + public_key + "\nAllowedIPs = "+endpoint_allowed_ip+"\nEndpoint = " + endpoint
+            def generate(private_key, allowed_ip, DNS, public_key, endpoint):
+                yield "[Interface]\nPrivateKey = " + private_key + "\nAddress = " + allowed_ip + "\nDNS = " + DNS + "\n\n[Peer]\nPublicKey = " + public_key + "\nAllowedIPs = "+endpoint_allowed_ip+"\nEndpoint = " + endpoint
 
-                return app.response_class(generate(private_key, allowed_ip, DNS, public_key, endpoint),
-                                        mimetype='text/conf',
-                                        headers={"Content-Disposition": "attachment;filename=" + filename + ".conf"})
-    
-    return redirect("/configuration/" + config_name)
+            return app.response_class(generate(private_key, allowed_ip, DNS, public_key, endpoint),
+                                      mimetype='text/conf',
+                                      headers={"Content-Disposition": "attachment;filename=" + filename + ".conf"})
+    else:
+        return redirect("/configuration/" + config_name)
 
 # Switch peer displate mode
 @app.route('/switch_display_mode/<mode>', methods=['GET'])
 def switch_display_mode(mode):
     if mode in ['list','grid']:
+        config = configparser.ConfigParser(strict=False)
         config.read(dashboard_conf)
         config.set("Peers", "peer_display_mode", mode)
         config.write(open(dashboard_conf, "w"))
@@ -1136,19 +1324,19 @@ Dashboard Tools Related
 @app.route('/get_ping_ip', methods=['POST'])
 def get_ping_ip():
     config = request.form['config']
+    db = sqlite3.connect(get_db_path(config))
     html = ""
-    with DatabaseManager(f"db/{config}.json") as db:
-        for i in db.all():
-            html += '<optgroup label="' + i['name'] + ' - ' + i['id'] + '">'
-            allowed_ip = str(i['allowed_ip']).split(",")
-            for k in allowed_ip:
-                k = k.split("/")
-                if len(k) == 2:
-                    html += "<option value=" + k[0] + ">" + k[0] + "</option>"
-            endpoint = str(i['endpoint']).split(":")
-            if len(endpoint) == 2:
-                html += "<option value=" + endpoint[0] + ">" + endpoint[0] + "</option>"
-            html += "</optgroup>"
+    for i in db.execute("SELECT * FROM peers").fetchall():
+        html += '<optgroup label="' + i['name'] + ' - ' + i['id'] + '">'
+        allowed_ip = str(i['allowed_ip']).split(",")
+        for k in allowed_ip:
+            k = k.split("/")
+            if len(k) == 2:
+                html += "<option value=" + k[0] + ">" + k[0] + "</option>"
+        endpoint = str(i['endpoint']).split(":")
+        if len(endpoint) == 2:
+            html += "<option value=" + endpoint[0] + ">" + endpoint[0] + "</option>"
+        html += "</optgroup>"
     return html
 
 # Ping IP
@@ -1195,102 +1383,125 @@ def traceroute_ip():
 @app.route('/create_client/<config_name>', methods=['POST'])
 def create_client(config_name):
     cleanup_inactive_peers()
-    data = request.get_json()
     
-    with DatabaseManager(f"db/{config_name}.json") as db:
-        peers = Query()
-        
-        keys = get_conf_peer_key(config_name)
-        private_key=""
-        public_key=""
-        checkExist=False
-        config_content=""
-        
-        for peer in db.all():
-            if peer["name"]==data["name"]:
-                config_content = f"""# {peer['name']}
-                [Interface]
-                PrivateKey = {peer['private_key']}
-                Address = {peer['allowed_ip']}
-                DNS = {DEFAULT_DNS}
+    db_path = get_db_path(config_name)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    data = request.get_json()
+    keys = get_conf_peer_key(config_name)
+    private_key=""
+    public_key=""
+    checkExist=False
+    config_content=""
+    
+    # Kiểm tra peer có tồn tại
+    cursor.execute("SELECT * FROM peers WHERE name = ?", (data["name"],))
+    peer = cursor.fetchone()
+    
+    if peer:
+        # Peer đã tồn tại
+        config_content = f"""# {peer['name']}
+            [Interface]
+            PrivateKey = {peer['private_key']}
+            Address = {peer['allowed_ip']}
+            DNS = {DEFAULT_DNS}
 
-                [Peer]
-                PublicKey = {peer['public_key']}
-                Endpoint ={peer['endpoint_allowed_ip']}
-                AllowedIPs = 0.0.0.0/0
-                PersistentKeepalive = {data.get('keep_alive', 21)}
-                """
-                checkExist=True
+            [Peer]
+            PublicKey = {peer['public_key']}
+            Endpoint = {peer['endpoint_allowed_ip']}
+            AllowedIPs = 0.0.0.0/0
+            PersistentKeepalive = {data.get('keep_alive', 21)}
+            """
+        checkExist=True
+    
+    if not checkExist:
+        check = False
+        while not check:
+            key = gen_private_key()
+            private_key = key["private_key"]
+            public_key = key["public_key"]
+            if len(public_key) != 0 and public_key not in keys:
+                check = True
+        
+        # Tìm IP địa chỉ tiếp theo
+        cursor.execute("SELECT allowed_ip FROM peers WHERE allowed_ip LIKE ?", (f"{BASE_IP}.%",))
+        existing_ips = []
+        
+        for row in cursor.fetchall():
+            try:
+                ip_part = row['allowed_ip'].split('.')[3].split('/')[0]
+                existing_ips.append(int(ip_part))
+            except:
+                pass
+        
+        next_ip=2
+        for ip in range(2,255,1):
+            if ip not in existing_ips:
+                next_ip = ip
                 break
                 
-        if not checkExist:
-            check = False
-            while not check:
-                key = gen_private_key()
-                private_key = key["private_key"]
-                public_key = key["public_key"]
-                if len(public_key) != 0 and public_key not in keys:
-                    check = True
-            
-            # 2. Tạo allowed_ips dạng 10.66.66.xx/32
-            existing_ips = [
-                int(peer['allowed_ip'].split('.')[3].split('/')[0])
-                for peer in db.all()
-                if 'allowed_ip' in peer and peer['allowed_ip'].startswith(BASE_IP)
-            ]
-            
-            next_ip=2
-            for ip in range(2,255,1):
-                if ip not in existing_ips:
-                    next_ip =ip
-                    break
-            allowed_ips = f"{BASE_IP}.{next_ip}/32"
+        allowed_ips = f"{BASE_IP}.{next_ip}/32"
+        print("--------------------------------")
+        print("existing_ips:", existing_ips)
+        print("ip allowed_ip:", allowed_ips)
+        print("------------------------------")
 
-            # 3. Kiểm tra IP trùng
-            if db.search(peers.allowed_ips == allowed_ips):
-                return jsonify({"error": "IP đã tồn tại"}), 409
-                
-            try:
-                status = subprocess.check_output(
-                    "wg set " + config_name + " peer " + public_key + " allowed-ips " + allowed_ips, shell=True,
-                    stderr=subprocess.STDOUT)
-                status = subprocess.check_output("wg-quick save " + config_name, shell=True, stderr=subprocess.STDOUT)
-                get_all_peers_data(config_name)
+        # Kiểm tra IP trùng
+        cursor.execute("SELECT COUNT(*) FROM peers WHERE allowed_ip = ?", (allowed_ips,))
+        if cursor.fetchone()[0] > 0:
+            conn.close()
+            return jsonify({"error": "IP đã tồn tại"}), 409
+            
+        try:
+            status = subprocess.check_output(
+                "wg set " + config_name + " peer " + public_key + " allowed-ips " + allowed_ips, shell=True,
+                stderr=subprocess.STDOUT)
+            status = subprocess.check_output("wg-quick save " + config_name, shell=True, stderr=subprocess.STDOUT)
+            get_all_peers_data(config_name)
 
-            except subprocess.CalledProcessError as exc:
-                return exc.output.strip()
+        except subprocess.CalledProcessError as exc:
+            conn.close()
+            return exc.output.strip()
+        
+        public_key_ip = public_key
+        public_key = get_conf_pub_key(config_name)
+        listen_port = get_conf_listen_port(config_name)
+        config = get_dashboard_conf()
+        endpoint = config.get("Peers","remote_endpoint") + ":" + listen_port
+        
+        try:
+            cursor.execute("""
+                UPDATE peers 
+                SET name = ?, private_key = ?, DNS = ?, public_key = ?, endpoint_allowed_ip = ?, allowed_ip = ?
+                WHERE id = ?
+            """, (
+                data['name'], private_key, DEFAULT_DNS, public_key, 
+                endpoint, allowed_ips, public_key_ip
+            ))
+            conn.commit()
+        except Exception as exc:
+            print(f"Error updating peer: {str(exc)}")
             
-            public_key_ip = public_key
-            public_key = get_conf_pub_key(config_name)
-            listen_port = get_conf_listen_port(config_name)
-            config = get_dashboard_conf()
-            endpoint = config.get("Peers","remote_endpoint") + ":" + listen_port
-            
-            try:
-                db.update({"name": data['name'], "private_key": private_key, "DNS": DEFAULT_DNS,"public_key":public_key,
-                "endpoint_allowed_ip": endpoint,"allowed-ips":allowed_ips},
-                peers.id == public_key_ip)
-            except Exception as e:
-                print(f"Error updating peer in database: {str(e)}")
-                
+        filename = data["name"]
+        if len(filename) == 0:
+            filename = "Untitled_Peers"
+        else:
             filename = data["name"]
+            # Clean filename
+            illegal_filename = [".", ",", "/", "?", "<", ">", "\\", ":", "*", '|' '\"', "com1", "com2", "com3",
+                            "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4",
+                        "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "con", "nul", "prn"]
+            for i in illegal_filename:
+                filename = filename.replace(i, "")
             if len(filename) == 0:
-                filename = "Untitled_Peers"
-            else:
-                filename = data["name"]
-                # Clean filename
-                illegal_filename = [".", ",", "/", "?", "<", ">", "\\", ":", "*", '|' '\"', "com1", "com2", "com3",
-                                "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4",
-                            "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "con", "nul", "prn"]
-                for i in illegal_filename:
-                    filename = filename.replace(i, "")
-                if len(filename) == 0:
-                    filename = "Untitled_Peer"
-                filename = "".join(filename.split(' '))
-                filename = filename + "_" + config_name
-                
-            # 4. Tạo config
-            config_content = f"""# {data['name']}
+                filename = "Untitled_Peer"
+            filename = "".join(filename.split(' '))
+            filename = filename + "_" + config_name
+            
+        # Tạo config
+        config_content = f"""# {data['name']}
                 [Interface]
                 PrivateKey = {private_key}
                 Address = {allowed_ips}
@@ -1303,14 +1514,13 @@ def create_client(config_name):
                 PersistentKeepalive = {data.get('keep_alive', 25)}
                 """
 
-    # 6. Trả về file config
+    conn.close()
+    
+    # Trả về file config
     response = make_response(config_content)
     response.headers['Content-Disposition'] = \
             f'attachment; filename="{data["name"]}_wg.conf"'
     return response
-
-# The rest of the code remains the same
-import requests
 
 def get_public_ip():
     response = requests.get("https://ifconfig.me")
@@ -1370,11 +1580,8 @@ def init_dashboard():
         config['Peers']['peer_keep_alive'] = "21"
     config.write(open(dashboard_conf, "w"))
     config.clear()
-import signal
-import sys
+
 if __name__ == "__main__":
-    signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
-    signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
     init_dashboard()
     config = configparser.ConfigParser(strict=False)
     config.read('wg-dashboard.ini')
