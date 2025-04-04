@@ -25,6 +25,7 @@ update = ""
 DEFAULT_DNS="1.1.1.1"
 DEFAULT_ENDPOINT_ALLOWED_IP="0.0.0.0/0"
 BASE_IP = "10.66.66"  # Phần IP cố định
+INACTIVE_DAYS = 30  # Number of days after which a peer is considered inactive
 # DEFAULT=
 # Flask App Configuration
 app = Flask("WGDashboard")
@@ -38,125 +39,72 @@ app.config['TEMPLATES_AUTO_RELOAD'] = True
 REDIS_HOST = 'localhost'
 REDIS_PORT = 6379
 REDIS_DB = 0
-REDIS_PASSWORD = None  # Set to None if no password is required
-REDIS_CLIENT = None
-REDIS_LOCK = threading.Lock()
+REDIS_PASSWORD = None  # Set this if your Redis server requires authentication
+REDIS_PREFIX = 'wireguard:'
 
-# Keys for Redis
+# Redis connection with retry
+def get_redis_client(max_retries=3, retry_delay=1):
+    """Get Redis client with retry mechanism"""
+    for attempt in range(max_retries):
+        try:
+            r = redis.Redis(
+                host=REDIS_HOST,
+                port=REDIS_PORT,
+                db=REDIS_DB,
+                password=REDIS_PASSWORD,
+                decode_responses=True  # Automatically decode responses to strings
+            )
+            # Test connection
+            r.ping()
+            return r
+        except redis.exceptions.ConnectionError as e:
+            print(f"Error connecting to Redis: {e}")
+            if attempt < max_retries - 1:
+                print(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+    return None
+
+# Redis key helpers
+def get_peers_set_key(config_name):
+    """Get Redis key for peers set"""
+    return f"{REDIS_PREFIX}{config_name}:peers"
+
 def get_peer_key(config_name, peer_id):
     """Get Redis key for a peer"""
-    return f"wireguard:{config_name}:peer:{peer_id}"
-
-def get_config_key(config_name):
-    """Get Redis key for a configuration"""
-    return f"wireguard:{config_name}:config"
-
-def get_peers_set_key(config_name):
-    """Get Redis key for the set of peer IDs"""
-    return f"wireguard:{config_name}:peers"
+    return f"{REDIS_PREFIX}{config_name}:peer:{peer_id}"
 
 def get_last_seen_key(config_name, peer_id):
     """Get Redis key for peer's last seen timestamp"""
-    return f"wireguard:{config_name}:last_seen:{peer_id}"
+    return f"{REDIS_PREFIX}{config_name}:lastseen:{peer_id}"
 
-def get_redis_client():
-    """Get or create a Redis client"""
-    global REDIS_CLIENT
-    
-    with REDIS_LOCK:
-        if REDIS_CLIENT is None:
-            try:
-                REDIS_CLIENT = redis.Redis(
-                    host=REDIS_HOST,
-                    port=REDIS_PORT,
-                    db=REDIS_DB,
-                    password=REDIS_PASSWORD,
-                    decode_responses=True  # Automatically decode responses to strings
-                )
-                # Test the connection
-                REDIS_CLIENT.ping()
-            except redis.ConnectionError as e:
-                print(f"Error connecting to Redis: {e}")
-                REDIS_CLIENT = None
-    
-    return REDIS_CLIENT
-
-def get_peer_from_redis(config_name, peer_id):
-    """Get a peer from Redis"""
-    r = get_redis_client()
-    if not r:
-        return None
-    
-    peer_key = get_peer_key(config_name, peer_id)
-    if not r.exists(peer_key):
-        return None
-    
-    peer_data = r.hgetall(peer_key)
-    if not peer_data:
-        return None
-    
-    # Add the ID to the data
-    peer_data['id'] = peer_id
-    
-    return peer_data
-
-def get_all_peers_from_redis(config_name):
-    """Get all peers for a configuration from Redis"""
-    r = get_redis_client()
-    if not r:
-        return []
-    
-    # Get all peer IDs from the set
-    peers_set_key = get_peers_set_key(config_name)
-    peer_ids = r.smembers(peers_set_key)
-    
-    peers = []
-    for peer_id in peer_ids:
-        peer_data = get_peer_from_redis(config_name, peer_id)
-        if peer_data:
-            peers.append(peer_data)
-    
-    return peers
-
+# Redis data operations
 def save_peer_to_redis(config_name, peer_id, peer_data):
-    """Save a peer to Redis"""
+    """Save peer data to Redis"""
     r = get_redis_client()
     if not r:
         return False
     
-    # Add to the set of peers
-    peers_set_key = get_peers_set_key(config_name)
-    r.sadd(peers_set_key, peer_id)
-    
-    # Save the peer data
-    peer_key = get_peer_key(config_name, peer_id)
-    r.hset(peer_key, mapping=peer_data)
-    
-    # Update last seen
-    last_seen_key = get_last_seen_key(config_name, peer_id)
-    r.set(last_seen_key, int(time.time()))
-    
-    return True
-
-def delete_peer_from_redis(config_name, peer_id):
-    """Delete a peer from Redis"""
-    r = get_redis_client()
-    if not r:
+    try:
+        # Add peer ID to set of peers for this config
+        peers_set_key = get_peers_set_key(config_name)
+        r.sadd(peers_set_key, peer_id)
+        
+        # Save peer data as hash
+        peer_key = get_peer_key(config_name, peer_id)
+        
+        # Convert all values to strings for Redis
+        string_data = {k: str(v) for k, v in peer_data.items()}
+        
+        # Save to Redis
+        r.hset(peer_key, mapping=string_data)
+        
+        # Update last seen
+        update_peer_last_seen(config_name, peer_id)
+        
+        return True
+    except Exception as e:
+        print(f"Error saving peer to Redis: {str(e)}")
         return False
-    
-    # Remove from the set of peers
-    peers_set_key = get_peers_set_key(config_name)
-    r.srem(peers_set_key, peer_id)
-    
-    # Delete the peer data
-    peer_key = get_peer_key(config_name, peer_id)
-    r.delete(peer_key)
-    
-    # Delete last seen
-    last_seen_key = get_last_seen_key(config_name, peer_id)
-    r.delete(last_seen_key)
-    
-    return True
 
 def update_peer_last_seen(config_name, peer_id):
     """Update the last seen timestamp for a peer"""
@@ -164,20 +112,81 @@ def update_peer_last_seen(config_name, peer_id):
     if not r:
         return False
     
-    last_seen_key = get_last_seen_key(config_name, peer_id)
-    r.set(last_seen_key, int(time.time()))
+    try:
+        # Set last seen timestamp
+        last_seen_key = get_last_seen_key(config_name, peer_id)
+        r.set(last_seen_key, int(time.time()))
+        return True
+    except Exception as e:
+        print(f"Error updating last seen: {str(e)}")
+        return False
+
+def get_all_peers_from_redis(config_name):
+    """Get all peers for a config from Redis"""
+    r = get_redis_client()
+    if not r:
+        return []
     
-    return True
+    peers = []
+    try:
+        # Get all peer IDs for this config
+        peers_set_key = get_peers_set_key(config_name)
+        peer_ids = r.smembers(peers_set_key)
+        
+        # Get data for each peer
+        for peer_id in peer_ids:
+            peer_key = get_peer_key(config_name, peer_id)
+            peer_data = r.hgetall(peer_key)
+            
+            if peer_data:
+                # Add ID to the data
+                peer_data['id'] = peer_id
+                peers.append(peer_data)
+        
+        return peers
+    except Exception as e:
+        print(f"Error getting peers from Redis: {str(e)}")
+        return []
+
+def delete_peer_from_redis(config_name, peer_id):
+    """Delete a peer from Redis"""
+    r = get_redis_client()
+    if not r:
+        return False
+    
+    try:
+        # Remove peer from set
+        peers_set_key = get_peers_set_key(config_name)
+        r.srem(peers_set_key, peer_id)
+        
+        # Delete peer data
+        peer_key = get_peer_key(config_name, peer_id)
+        r.delete(peer_key)
+        
+        # Delete last seen data
+        last_seen_key = get_last_seen_key(config_name, peer_id)
+        r.delete(last_seen_key)
+        
+        return True
+    except Exception as e:
+        print(f"Error deleting peer from Redis: {str(e)}")
+        return False
+
+# Define a global variable to track last update time for each config
+last_db_update = {}
 
 def should_update_db(config_name):
-    """Check if database should be updated (every 5 minutes)"""
-    current_time = time.time()
+    """Check if we should update the database for this config"""
+    global last_db_update
+    
+    # Initialize if not exists
     if config_name not in last_db_update:
         last_db_update[config_name] = 0
-        return True
+        
+    current_time = int(time.time())
     
-    # Update every 5 minutes (300 seconds)
-    if current_time - last_db_update[config_name] >= 300:
+    # If it's been more than 3 seconds since last update, do it
+    if current_time - last_db_update.get(config_name, 0) > 3:
         last_db_update[config_name] = current_time
         return True
     return False
@@ -725,25 +734,58 @@ def get_all_peers_data(config_name):
         r.save()
 
 # Search for peers
-def get_peers(config_name, search, sort_t):
-    """Get filtered and sorted peers from Redis"""
-    get_all_peers_data(config_name)
-    
+def get_peers(config_name, search="", sort="name"):
+    """Get all peers with optional search and sorting"""
+    # Get Redis connection
     r = get_redis_client()
     if not r:
+        print("Redis connection not available")
         return []
     
-    # Get all peers
+    # Update peer data
+    if should_update_db(config_name):
+        get_all_peers_data(config_name)
+    
+    # Get all peers from Redis
     peers = get_all_peers_from_redis(config_name)
     
-    # Filter by search term if provided
-    if search and len(search) > 0:
+    # Apply search filter if provided
+    if search:
+        filtered_peers = []
         search = search.lower()
-        peers = [p for p in peers if search in p.get('name', '').lower()]
+        for peer in peers:
+            if (search in peer.get('name', '').lower() or 
+                search in peer.get('allowed_ip', '').lower() or
+                search in peer.get('id', '').lower()):
+                filtered_peers.append(peer)
+        peers = filtered_peers
     
-    # Sort peers
-    if sort_t:
-        peers = sorted(peers, key=lambda d: d.get(sort_t, ''))
+    # Apply sorting
+    if sort == "name":
+        peers.sort(key=lambda x: x.get('name', '').lower())
+    elif sort == "allowed_ip":
+        # Convert IP to tuple of integers for proper sorting
+        def ip_key(peer):
+            try:
+                ip = peer.get('allowed_ip', '0.0.0.0/0').split('/')[0]
+                return tuple(int(n) for n in ip.split('.'))
+            except:
+                return (0, 0, 0, 0)
+        peers.sort(key=ip_key)
+    elif sort == "latest_handshake":
+        # Sort by handshake time (newest first)
+        def handshake_key(peer):
+            try:
+                if peer.get('latest_handshake', '') == 'Never':
+                    return 0
+                return int(peer.get('latest_handshake', 0))
+            except:
+                return 0
+        peers.sort(key=handshake_key, reverse=True)
+    elif sort == "transfer_rx":
+        peers.sort(key=lambda x: int(x.get('transfer_rx', 0)), reverse=True)
+    elif sort == "transfer_tx":
+        peers.sort(key=lambda x: int(x.get('transfer_tx', 0)), reverse=True)
     
     return peers
 
@@ -1189,37 +1231,27 @@ def conf(config_name):
                            keep_alive=config.get("Peers","peer_keep_alive"))
 
 # Get configuration details
-@app.route('/get_config/<config_name>', methods=['GET'])
+@app.route('/get_conf/<config_name>', methods=['GET'])
 def get_conf(config_name):
-    config_interface = read_conf_file_interface(config_name)
-    search = request.args.get('search')
-    if len(search) == 0: search = ""
-    search = urllib.parse.unquote(search)
-    config = configparser.ConfigParser(strict=False)
-    config.read(dashboard_conf)
-    sort = config.get("Server", "dashboard_sort")
-    peer_display_mode = config.get("Peers", "peer_display_mode")
-    if "Address" not in config_interface.keys():
-        conf_address = "N/A"
-    else:
-        conf_address = config_interface['Address']
-    conf_data = {
-        "peer_data": get_peers(config_name, search, sort),
-        "name": config_name,
-        "status": get_conf_status(config_name),
-        "total_data_usage": get_conf_total_data(config_name),
-        "public_key": get_conf_pub_key(config_name),
-        "listen_port": get_conf_listen_port(config_name),
-        "running_peer": get_conf_running_peer_number(config_name),
-        "conf_address": conf_address
-    }
-    if conf_data['status'] == "stopped":
-        conf_data['checked'] = "nope"
-    else:
-        conf_data['checked'] = "checked"
-    print(config.get("Peers","remote_endpoint"))
-    return render_template('get_conf.html', conf_data=conf_data, wg_ip=config.get("Peers","remote_endpoint"), sort_tag=sort,
-                           dashboard_refresh_interval=int(config.get("Server", "dashboard_refresh_interval")), peer_display_mode=peer_display_mode)
+    """Get configuration details for a specific config"""
+    search = request.args.get('search', '')
+    sort = request.args.get('sort', 'name')
+    
+    # Get the configuration status
+    conf_status = get_conf_status(config_name)
+    
+    # Get peer data with search and sort criteria
+    peer_data = get_peers(config_name, search, sort)
+    
+    # Get the total data transfer
+    total_data = get_conf_total_data(config_name)
+    
+    return jsonify({
+        "status": conf_status,
+        "peer_data": peer_data,
+        "total_rx": total_data["rx"],
+        "total_tx": total_data["tx"]
+    })
 
 # Turn on / off a configuration
 @app.route('/switch/<config_name>', methods=['GET'])
@@ -1565,19 +1597,40 @@ Dashboard Tools Related
 @app.route('/get_ping_ip', methods=['POST'])
 def get_ping_ip():
     config = request.form['config']
-    db = TinyDB('db/' + config + '.json')
+    
+    # Get Redis connection
+    r = get_redis_client()
+    if not r:
+        return "Error: Redis connection not available"
+    
+    # Get all peers from Redis
+    peers = get_all_peers_from_redis(config)
+    
     html = ""
-    for i in db.all():
-        html += '<optgroup label="' + i['name'] + ' - ' + i['id'] + '">'
-        allowed_ip = str(i['allowed_ip']).split(",")
-        for k in allowed_ip:
-            k = k.split("/")
-            if len(k) == 2:
-                html += "<option value=" + k[0] + ">" + k[0] + "</option>"
-        endpoint = str(i['endpoint']).split(":")
-        if len(endpoint) == 2:
-            html += "<option value=" + endpoint[0] + ">" + endpoint[0] + "</option>"
-        html += "</optgroup>"
+    for peer in peers:
+        peer_id = peer.get('id', '')
+        peer_name = peer.get('name', 'Unknown')
+        
+        html += f'<optgroup label="{peer_name} - {peer_id}">'
+        
+        # Process allowed IPs
+        allowed_ip = peer.get('allowed_ip', '')
+        if allowed_ip:
+            allowed_ips = allowed_ip.split(',')
+            for ip in allowed_ips:
+                ip_parts = ip.split('/')
+                if len(ip_parts) == 2:
+                    html += f'<option value="{ip_parts[0]}">{ip_parts[0]}</option>'
+        
+        # Process endpoint
+        endpoint = peer.get('endpoint', '')
+        if endpoint:
+            endpoint_parts = endpoint.split(':')
+            if len(endpoint_parts) == 2:
+                html += f'<option value="{endpoint_parts[0]}">{endpoint_parts[0]}</option>'
+        
+        html += '</optgroup>'
+    
     return html
 
 # Ping IP
@@ -1844,3 +1897,134 @@ if __name__ == "__main__":
     wg_conf_path = config.get("Server", "wg_conf_path")
     config.clear()
     app.run(host=app_ip, debug=False, port=app_port)
+
+def get_all_configs():
+    """Get all WireGuard configurations"""
+    configs = []
+    
+    # Get Redis connection
+    r = get_redis_client()
+    if not r:
+        print("Redis connection not available")
+        return configs
+    
+    try:
+        # Get all config names from the system
+        config_files = subprocess.check_output("find /etc/wireguard -name '*.conf' -type f", 
+                                              shell=True, stderr=subprocess.STDOUT)
+        config_files = config_files.decode("utf-8").strip().split("\n")
+        
+        # If no configs found, return empty list
+        if not config_files or config_files[0] == '':
+            return configs
+        
+        # Process each configuration
+        for conf_file in config_files:
+            config_name = os.path.basename(conf_file).replace(".conf", "")
+            
+            # Get status
+            status = get_conf_status(config_name)
+            
+            # Get peer count
+            peer_count = 0
+            peers_set_key = get_peers_set_key(config_name)
+            if r.exists(peers_set_key):
+                peer_count = r.scard(peers_set_key)
+            
+            # Get interface address
+            address = "N/A"
+            try:
+                interface = read_conf_file_interface(config_name)
+                if "Address" in interface:
+                    address = interface["Address"]
+            except:
+                pass
+            
+            # Create config object
+            config = {
+                "name": config_name,
+                "status": status,
+                "peer_count": peer_count,
+                "address": address
+            }
+            
+            configs.append(config)
+        
+        return configs
+    except Exception as e:
+        print(f"Error getting configurations: {str(e)}")
+        return configs
+
+def get_conf_total_data(config_name):
+    """Get total data transfer for a configuration"""
+    # Get all peers
+    peers = get_all_peers_from_redis(config_name)
+    
+    # Calculate totals
+    total_rx = 0
+    total_tx = 0
+    
+    for peer in peers:
+        try:
+            # Get transfer data
+            rx = peer.get('transfer_rx', '0')
+            tx = peer.get('transfer_tx', '0')
+            
+            # Convert to integers
+            if isinstance(rx, str) and rx:
+                rx = int(rx)
+            else:
+                rx = 0
+                
+            if isinstance(tx, str) and tx:
+                tx = int(tx)
+            else:
+                tx = 0
+                
+            # Add to totals
+            total_rx += rx
+            total_tx += tx
+        except Exception as e:
+            print(f"Error processing transfer data: {str(e)}")
+    
+    return {
+        "rx": total_rx,
+        "tx": total_tx
+    }
+
+def generate_qrcode(config_name, peer_id):
+    """Generate QR code for a peer"""
+    # Get peer data from Redis
+    r = get_redis_client()
+    if not r:
+        return "Error: Redis connection not available"
+    
+    # Get peer data
+    peer_key = get_peer_key(config_name, peer_id)
+    peer_data = r.hgetall(peer_key)
+    
+    if not peer_data:
+        return "Peer not found"
+    
+    # Get server public key
+    server_public_key = get_conf_pub_key(config_name)
+    
+    # Get server endpoint
+    config = get_dashboard_conf()
+    listen_port = get_conf_listen_port(config_name)
+    endpoint = f"{config.get('Peers', 'remote_endpoint')}:{listen_port}"
+    
+    # Create config string
+    config_str = f"""[Interface]
+PrivateKey = {peer_data.get('private_key', '')}
+Address = {peer_data.get('allowed_ip', '')}
+DNS = {peer_data.get('DNS', DEFAULT_DNS)}
+
+[Peer]
+PublicKey = {server_public_key}
+Endpoint = {endpoint}
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = {peer_data.get('keepalive', '25')}
+"""
+    
+    return config_str
