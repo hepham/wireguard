@@ -1,0 +1,282 @@
+# Hướng dẫn sử dụng API Dashboard WireGuard
+
+## Tổng quan
+
+Dashboard WireGuard cung cấp giao diện web để quản lý các kết nối WireGuard VPN. Tài liệu này sẽ hướng dẫn cách sử dụng các API để tương tác với hệ thống.
+
+![WireGuard Logo](https://www.wireguard.com/img/wireguard.svg)
+
+## Cài đặt và Khởi động
+
+### Yêu cầu hệ thống
+- Python 3.6+ 
+- WireGuard đã được cài đặt
+- Các thư viện Python: Flask, tinydb, ifcfg, flask_qrcode, icmplib
+
+### Cách chạy
+1. Clone mã nguồn:
+```
+git clone [repository-url]
+cd wireGuard
+```
+
+2. Cài đặt các thư viện phụ thuộc:
+```
+pip install flask tinydb ifcfg flask_qrcode icmplib
+```
+
+3. Chạy ứng dụng:
+```
+python src/dashboard.py
+```
+
+Mặc định, ứng dụng chạy trên cổng 10086 và có thể truy cập thông qua: `http://localhost:10086`
+
+![Giao diện Dashboard](https://i.imgur.com/example.jpg)
+
+## Luồng hoạt động
+
+1. **Khởi tạo**: Khi bắt đầu, hệ thống sẽ tạo file cấu hình `wg-dashboard.ini` nếu chưa tồn tại
+2. **Xác thực**: Người dùng đăng nhập với thông tin mặc định (tên người dùng: admin, mật khẩu: admin)
+3. **Quản lý cấu hình**: Hiển thị và quản lý các cấu hình WireGuard
+4. **Quản lý peer**: Thêm, xóa, sửa các peer trong mỗi cấu hình
+
+![Luồng hoạt động](https://i.imgur.com/example2.jpg)
+
+## Các API chính
+
+### Authentication
+
+#### Đăng nhập
+- **Endpoint**: `/auth`
+- **Method**: POST
+- **Dữ liệu**: username, password
+- **Mô tả**: Xác thực người dùng
+
+#### Đăng xuất
+- **Endpoint**: `/signout`
+- **Method**: GET
+- **Mô tả**: Đăng xuất người dùng hiện tại
+
+### Quản lý cấu hình
+
+#### Danh sách cấu hình
+- **Endpoint**: `/`
+- **Method**: GET
+- **Mô tả**: Hiển thị danh sách tất cả cấu hình
+
+#### Xem chi tiết cấu hình
+- **Endpoint**: `/configuration/<config_name>`
+- **Method**: GET
+- **Mô tả**: Hiển thị chi tiết của một cấu hình cụ thể
+
+#### Lấy thông tin cấu hình
+- **Endpoint**: `/get_config/<config_name>`
+- **Method**: GET
+- **Tham số**: search (tùy chọn để tìm kiếm peer)
+- **Mô tả**: Lấy thông tin chi tiết về cấu hình và các peer
+
+#### Bật/tắt cấu hình
+- **Endpoint**: `/switch/<config_name>`
+- **Method**: GET
+- **Mô tả**: Bật hoặc tắt một cấu hình WireGuard
+
+### Quản lý peer
+
+#### Thêm peer
+- **Endpoint**: `/add_peer/<config_name>`
+- **Method**: POST
+- **Dữ liệu JSON**:
+  ```json
+  {
+    "public_key": "công khai key của peer",
+    "allowed_ips": "IP được phép (VD: 10.66.66.2/32)",
+    "endpoint_allowed_ip": "IP endpoint được phép (VD: 0.0.0.0/0)",
+    "DNS": "DNS server (VD: 1.1.1.1)",
+    "name": "tên peer",
+    "private_key": "khóa riêng tư (tùy chọn)",
+    "MTU": "1420",
+    "keep_alive": "21"
+  }
+  ```
+- **Mô tả**: Thêm một peer mới vào cấu hình
+
+#### Xóa peer
+- **Endpoint**: `/remove_peer/<config_name>`
+- **Method**: POST
+- **Dữ liệu JSON**:
+  ```json
+  {
+    "peer_id": "khóa công khai của peer"
+  }
+  ```
+- **Mô tả**: Xóa một peer khỏi cấu hình
+
+#### Cập nhật thiết lập peer
+- **Endpoint**: `/save_peer_setting/<config_name>`
+- **Method**: POST
+- **Dữ liệu JSON**:
+  ```json
+  {
+    "id": "khóa công khai của peer",
+    "name": "tên mới",
+    "private_key": "khóa riêng tư",
+    "DNS": "DNS mới",
+    "allowed_ip": "IP được phép mới",
+    "endpoint_allowed_ip": "IP endpoint được phép mới",
+    "MTU": "MTU mới",
+    "keep_alive": "giá trị keepalive mới"
+  }
+  ```
+- **Mô tả**: Cập nhật thiết lập của một peer
+
+#### Lấy dữ liệu peer
+- **Endpoint**: `/get_peer_data/<config_name>`
+- **Method**: POST
+- **Dữ liệu JSON**:
+  ```json
+  {
+    "id": "khóa công khai của peer"
+  }
+  ```
+- **Mô tả**: Lấy thông tin chi tiết của một peer
+
+#### Tạo client mới
+- **Endpoint**: `/create_client/<config_name>`
+- **Method**: POST
+- **Dữ liệu JSON**:
+  ```json
+  {
+    "name": "tên client",
+    "keep_alive": 21
+  }
+  ```
+- **Mô tả**: Tạo và cấu hình client mới, trả về file cấu hình
+
+### Công cụ
+
+#### Tạo khóa
+- **Endpoint**: `/generate_peer`
+- **Method**: GET
+- **Mô tả**: Tạo cặp khóa private/public mới
+
+#### Tạo khóa công khai từ khóa riêng tư
+- **Endpoint**: `/generate_public_key`
+- **Method**: POST
+- **Dữ liệu JSON**:
+  ```json
+  {
+    "private_key": "khóa riêng tư"
+  }
+  ```
+- **Mô tả**: Tạo khóa công khai từ khóa riêng tư
+
+#### Ping IP
+- **Endpoint**: `/ping_ip`
+- **Method**: POST
+- **Dữ liệu**: ip, count
+- **Mô tả**: Kiểm tra kết nối tới một IP
+
+#### Traceroute IP
+- **Endpoint**: `/traceroute_ip`
+- **Method**: POST
+- **Dữ liệu**: ip
+- **Mô tả**: Theo dõi đường đi của gói tin tới một IP
+
+## Tính năng tự động
+
+### Dọn dẹp peer không hoạt động
+Hệ thống tự động dọn dẹp các peer không hoạt động sau một khoảng thời gian (mặc định là 3 phút).
+
+## Ví dụ
+
+### Tạo client WireGuard mới
+```bash
+curl -X POST http://localhost:10086/create_client/wg0 \
+  -H "Content-Type: application/json" \
+  -d '{"name":"test_client","keep_alive":25}'
+```
+
+Lệnh này sẽ:
+1. Tạo client mới với tên "test_client"
+2. Tự động tạo khóa
+3. Gán địa chỉ IP trong dải mạng 10.66.66.x
+4. Trả về file cấu hình WireGuard
+
+### Kiểm tra kết nối
+```bash
+curl -X POST http://localhost:10086/ping_ip \
+  -d "ip=10.66.66.2&count=4"
+```
+
+## Cấu trúc dữ liệu
+
+Dữ liệu của peer được lưu trong TinyDB với các trường:
+- id: Khóa công khai 
+- private_key: Khóa riêng tư (tùy chọn)
+- name: Tên peer
+- allowed_ip: Địa chỉ IP được cấp 
+- endpoint_allowed_ip: Địa chỉ IP được phép kết nối
+- DNS: Máy chủ DNS
+- status: Trạng thái (running/stopped)
+- traffic: Lịch sử lưu lượng
+- total_data: Tổng lưu lượng dữ liệu
+- total_sent: Tổng dữ liệu gửi đi
+- total_receive: Tổng dữ liệu nhận
+
+## Lỗi thường gặp và cách khắc phục
+
+### 1. Lỗi JSON không hợp lệ
+
+**Lỗi:**
+```
+json.decoder.JSONDecodeError: Invalid control character at: line 1 column X
+```
+
+**Nguyên nhân:** File database JSON bị hỏng do ký tự không hợp lệ
+
+**Giải pháp:**
+- Hệ thống sẽ tự động phát hiện và tạo lại database
+- Nếu vẫn gặp lỗi, bạn có thể xóa thủ công file trong thư mục `db/`
+
+### 2. Lỗi không thể kết nối tới WireGuard
+
+**Lỗi:**
+```
+Command failed: wg show wg0 dump
+```
+
+**Nguyên nhân:** Interface WireGuard không tồn tại hoặc không được khởi động
+
+**Giải pháp:**
+- Kiểm tra xem WireGuard đã được cài đặt: `wg --version`
+- Khởi động interface: `wg-quick up wg0`
+
+## Thêm ảnh vào tài liệu Markdown
+
+Để thêm ảnh vào tài liệu Markdown, sử dụng cú pháp:
+
+```markdown
+![Alt text](URL hoặc đường dẫn tới ảnh)
+```
+
+Ví dụ:
+```markdown
+![WireGuard Logo](https://www.wireguard.com/img/wireguard.svg)
+```
+
+Để thêm ảnh từ thư mục local:
+```markdown
+![Screenshot](images/screenshot.png)
+```
+
+## Ghi chú
+
+- Mặc định, API chạy trên cổng 10086 và địa chỉ 0.0.0.0
+- Tài khoản mặc định: admin/admin
+- File cấu hình được lưu tại /etc/wireguard
+- IP được gán tự động trong dải 10.66.66.x
+
+## Sơ đồ hệ thống
+
+![System Architecture](https://i.imgur.com/example3.jpg) 

@@ -1,121 +1,153 @@
 # Wireguard VPN Dashboard
 
-A containerized Wireguard VPN server with web dashboard for easy configuration and management.
+Một máy chủ Wireguard VPN được container hóa với bảng điều khiển web để cấu hình và quản lý dễ dàng.
 
-## Features
+## Tính năng
 
-- Easy-to-use web dashboard for managing Wireguard VPN
-- Client configuration via QR codes
-- User management interface
-- Traffic statistics and monitoring
+- Bảng điều khiển web dễ sử dụng để quản lý Wireguard VPN
+- Cấu hình máy khách thông qua mã QR
+- Giao diện quản lý người dùng
+- Thống kê và giám sát lưu lượng
 
-## Requirements
+## Yêu cầu
 
-- Ubuntu/Debian (recommended) or other Linux distribution
-- Open ports: 51820/udp (Wireguard) and 10086/tcp (Dashboard)
+- Ubuntu/Debian (khuyến nghị) hoặc các bản phân phối Linux khác
+- Các cổng mở: 51820/udp (Wireguard) và 10086/tcp (Bảng điều khiển)
+- Python 3.8 trở lên
+- pip (Python package manager)
 
-## Quick Start
+## Hướng dẫn nhanh
 
-
-If you don't have Docker installed, use the provided script:
-
-
-### 1. Clone the repository
+### 1. Clone kho lưu trữ
 
 ```bash
 git clone https://github.com/hepham/wireguard.git
 cd wireguard-dashboard/src
 ```
-### 2. Install wireguard
+
+### 2. Tạo và kích hoạt môi trường ảo
+
+```bash
+# Tạo môi trường ảo
+python3 -m venv venv
+
+# Kích hoạt môi trường ảo
+# Trên Linux/Mac:
+source venv/bin/activate
+# Trên Windows:
+.\venv\Scripts\activate
+```
+
+### 3. Cài đặt các yêu cầu
+
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Cài đặt wireguard
 ```bash
 sudo chmod +x wireguard-install.sh
 sudo ./wireguard-install.sh
 ```
-Set port 51820 other default config.
+Đặt cổng 51820 và các cấu hình mặc định khác.
 
-### 3. Install WGDashboard
+### 5. Cài đặt WGDashboard
 
 ```bash
 sudo chmod u+x wgd.sh
 sudo ./wgd.sh install
 ```
 
-### 4. Configure permissions for WireGuard
+### 6. Cấu hình quyền cho WireGuard
 
-Give read and execute permission to the root of the WireGuard configuration folder. You can change the path if your configuration files are not stored in `/etc/wireguard`.
+Cấp quyền đọc và thực thi cho thư mục gốc của cấu hình WireGuard. Bạn có thể thay đổi đường dẫn nếu các file cấu hình của bạn không được lưu trong `/etc/wireguard`.
 
 ```bash
 sudo chmod -R 755 /etc/wireguard
 ```
 
-### 5. Run WGDashboard
+### 7. Chạy WGDashboard
 
 ```bash
 ./wgd.sh start
 ```
 
-Open your browser and navigate to:
+Mở trình duyệt và truy cập:
 ```
-http://your-server-ip:10086
+http://địa-chỉ-ip-máy-chủ:10086
 ```
 
-Default login credentials:
-- Username: admin
-- Password: admin
+Thông tin đăng nhập mặc định:
+- Tên đăng nhập: admin
+- Mật khẩu: admin
 
-**Important:** Change the default credentials immediately after first login.
+**Quan trọng:** Hãy thay đổi thông tin đăng nhập mặc định ngay sau khi đăng nhập lần đầu.
 
-## Project Structure
+## Cấu trúc dự án
 
 ```
 wireguard/
-├── docker-compose.yml     # Docker configuration
-├── env.sh                 # Environment setup script
-├── img/                   # Images for the dashboard
+├── docker-compose.yml     # Cấu hình Docker
+├── env.sh                 # Script thiết lập môi trường
+├── img/                   # Hình ảnh cho bảng điều khiển
 └── src/
-    ├── dashboard.py       # Main dashboard application
-    ├── db/                # Database files
-    ├── static/            # Static assets for the web interface
-    ├── templates/         # HTML templates
-    ├── wgd.sh             # Wireguard dashboard control script
-    └── requirements.txt   # Python dependencies
+    ├── dashboard.py       # Ứng dụng bảng điều khiển chính
+    ├── db/                # Các file cơ sở dữ liệu
+    ├── static/            # Tài nguyên tĩnh cho giao diện web
+    ├── templates/         # Các template HTML
+    ├── wgd.sh             # Script điều khiển bảng điều khiển wireguard
+    └── requirements.txt   # Các phụ thuộc Python
 ```
 
-## Client Setup
+## Thiết lập máy khách
 
-1. Access the dashboard at http://your-server-ip:10086
-2. Navigate to the "Clients" section
-3. Click "Add Client" and fill in the required information
-4. Download the configuration file or scan the QR code with your Wireguard client app
+1. Truy cập bảng điều khiển tại http://ip:10086
+2. Điều hướng đến phần "Clients"
+3. Nhấp "Add Client" và điền thông tin cần thiết
+4. Tải file cấu hình hoặc quét mã QR bằng ứng dụng máy khách Wireguard
 
-## Managing the Server
+## Quản lý máy chủ
 
-### Stop the server
+### Tích hợp với OpenVPN Manager
+
+Để quản lý server thông qua OpenVPN Manager, bạn cần call API endpoint:
+
+
+API_ENDPOINT=http://openvpn_manager_ip/server/list METHOD =["POST"]
+
+[
+    {
+        "IP": "http://3.139.103.95:10086",
+        "category": "Videos",
+        "description": "Telemundo",
+        "flag": "https://flagcdn.com/w320/us.png",
+        "isFree": true
+    }
+]
+
+Sau khi cấu hình, WGDashboard sẽ tự động đồng bộ danh sách server với OpenVPN Manager.
+
+### Dừng máy chủ
 
 ```bash
 ./wgd.sh stop
 ```
 
+## Xử lý sự cố
 
+### Vấn đề kết nối
 
-## Troubleshooting
+- Đảm bảo các cổng 51820/udp và 10086/tcp đã được mở trong tường lửa
 
-### Connection Issues
+### Vấn đề truy cập bảng điều khiển
 
-- Ensure ports 51820/udp and 10086/tcp are open in your firewall
-- Check if the container is running: `docker ps`
-- Verify logs for errors: `docker-compose logs -f`
+- Kiểm tra địa chỉ IP máy chủ có chính xác không
+- Kiểm tra xem mạng của bạn có cho phép truy cập cổng 10086 không
+- Đảm bảo container đang chạy đúng cách
 
-### Dashboard Access Problems
+## Khuyến nghị bảo mật
 
-- Verify the server IP address is correct
-- Check if your network allows access to port 10086
-- Ensure the container is running properly
-
-## Security Recommendations
-
-- Change default dashboard credentials immediately
-- Use a reverse proxy with HTTPS for dashboard access
-- Configure firewall rules to limit access to the dashboard
-- Regularly update the container: `docker-compose pull && docker-compose up -d`
+- Thay đổi thông tin đăng nhập bảng điều khiển mặc định ngay lập tức
+- Sử dụng proxy ngược với HTTPS để truy cập bảng điều khiển
+- Cấu hình quy tắc tường lửa để giới hạn quyền truy cập vào bảng điều khiển
 

@@ -14,7 +14,8 @@ services:
     - ./src:/home/app/src
    working_dir: /home/app/src
    command: >
-      sh -c "/home/app/env.sh &&
+      sh -c "chmod +x /home/app/env.sh && configs:
+      /home/app/env.sh &&
              sleep 5 &&
              /home/app/src/wgd.sh debug &&
              sleep infinity"
