@@ -643,95 +643,81 @@ def get_allowed_ip(config_name, db, peers, conf_peer_data):
 
 # Look for new peers from WireGuard
 def get_all_peers_data(config_name):
-    """Get and update peer data from WireGuard to Redis"""
+    """Get all peers data and synchronize with WireGuard"""
     # Get Redis connection
     r = get_redis_client()
     if not r:
         print("Redis connection not available")
-        return
+        return []
     
-    # Read configuration files
-    conf_peer_data = read_conf_file(config_name)
-    config = get_dashboard_conf()
+    # Get WireGuard status
+    conf_status = get_conf_status(config_name)
+    if conf_status == "stopped":
+        # Return peers from Redis if WireGuard is stopped
+        return get_all_peers_from_redis(config_name)
     
-    # Check if we should persist to disk
-    should_persist = should_update_db(config_name)
-    
-    # Track existing peers for cleanup
-    existing_peer_ids = set()
-    
-    # Process peers from configuration
-    for peer in conf_peer_data['Peers']:
-        if "PublicKey" not in peer:
-            continue
+    # Get peers from WireGuard
+    try:
+        # Get peers from WireGuard
+        wg_peers = get_wireguard_peers(config_name)
         
-        peer_id = peer['PublicKey']
-        existing_peer_ids.add(peer_id)
+        # Get peers from Redis
+        redis_peers = get_all_peers_from_redis(config_name)
+        redis_peers_dict = {peer['id']: peer for peer in redis_peers}
         
-        # Check if peer exists in Redis
-        peer_key = get_peer_key(config_name, peer_id)
-        if not r.exists(peer_key):
-            # Add new peer
-            new_peer = {
-                "id": peer_id,
-                "private_key": "",
-                "DNS": config.get("Peers", "peer_global_DNS"),
-                "endpoint_allowed_ip": config.get("Peers", "peer_endpoint_allowed_ip"),
-                "name": "",
-                "total_receive": 0,
-                "total_sent": 0,
-                "total_data": 0,
-                "endpoint": "N/A",
-                "status": "stopped",
-                "latest_handshake": "N/A",
-                "allowed_ip": "N/A",
-                "traffic": "[]",
-                "mtu": config.get("Peers", "peer_mtu"),
-                "keepalive": config.get("Peers", "peer_keep_alive"),
-                "remote_endpoint": config.get("Peers", "remote_endpoint")
-            }
+        # Update Redis with WireGuard data
+        for wg_peer in wg_peers:
+            peer_id = wg_peer['id']
             
-            # Save to Redis
-            r.hset(peer_key, mapping=new_peer)
-            r.sadd(get_peers_set_key(config_name), peer_id)
-        else:
-            # Update peer settings if needed
-            fields_to_check = {
-                "DNS": config.get("Peers", "peer_global_DNS"),
-                "endpoint_allowed_ip": config.get("Peers", "peer_endpoint_allowed_ip"),
-                "private_key": "",
-                "mtu": config.get("Peers", "peer_mtu"),
-                "keepalive": config.get("Peers", "peer_keep_alive"),
-                "remote_endpoint": config.get("Peers", "remote_endpoint")
-            }
-            
-            # Check each field and update if missing
-            for field, default_value in fields_to_check.items():
-                if not r.hexists(peer_key, field):
-                    r.hset(peer_key, field, default_value)
-    
-    # Remove peers that no longer exist in WireGuard
-    peers_key = get_peers_set_key(config_name)
-    all_peer_ids = r.smembers(peers_key)
-    
-    for peer_id in all_peer_ids:
-        if peer_id not in existing_peer_ids:
-            # Delete peer data
-            delete_peer_from_redis(config_name, peer_id)
-    
-    # Update real-time data
-    tic = time.perf_counter()
-    get_latest_handshake(config_name)
-    get_transfer(config_name)
-    get_endpoint(config_name)
-    get_allowed_ip(config_name, conf_peer_data)
-    toc = time.perf_counter()
-    print(f"Finish fetching data in {toc - tic:0.4f} seconds")
-    
-    # Ensure data is persisted if needed
-    if should_persist:
-        print(f"Persisting Redis data for {config_name}")
-        r.save()
+            # Check if peer exists in Redis
+            if peer_id in redis_peers_dict:
+                # Update existing peer
+                redis_peer = redis_peers_dict[peer_id]
+                
+                # Update fields from WireGuard
+                update_data = {
+                    'latest_handshake': wg_peer.get('latest_handshake', ''),
+                    'allowed_ip': wg_peer.get('allowed_ip', ''),
+                    'transfer_rx': wg_peer.get('transfer_rx', '0'),
+                    'transfer_tx': wg_peer.get('transfer_tx', '0')
+                }
+                
+                # Update peer data in Redis
+                peer_key = get_peer_key(config_name, peer_id)
+                r.hset(peer_key, mapping=update_data)
+                
+                # Update last seen if handshake is recent
+                if wg_peer.get('latest_handshake', '') and wg_peer.get('latest_handshake', '') != 'Never':
+                    update_peer_last_seen(config_name, peer_id)
+            else:
+                # New peer found in WireGuard but not in Redis
+                new_peer = {
+                    'name': f'Peer_{peer_id[:8]}',
+                    'allowed_ip': wg_peer.get('allowed_ip', ''),
+                    'DNS': DEFAULT_DNS,
+                    'endpoint_allowed_ip': DEFAULT_ENDPOINT_ALLOWED_IP,
+                    'private_key': '',
+                    'mtu': '',
+                    'keepalive': '',
+                    'latest_handshake': wg_peer.get('latest_handshake', ''),
+                    'transfer_rx': wg_peer.get('transfer_rx', '0'),
+                    'transfer_tx': wg_peer.get('transfer_tx', '0'),
+                    'created_at': datetime.now().isoformat()
+                }
+                
+                # Save new peer to Redis
+                save_peer_to_redis(config_name, peer_id, new_peer)
+                
+                # Add to local dictionary for the return value
+                redis_peers_dict[peer_id] = new_peer
+                redis_peers_dict[peer_id]['id'] = peer_id
+        
+        # Return all peers
+        return list(redis_peers_dict.values())
+        
+    except Exception as e:
+        print(f"Error getting peers from WireGuard: {str(e)}")
+        return get_all_peers_from_redis(config_name)
 
 # Search for peers
 def get_peers(config_name, search="", sort="name"):
@@ -1234,24 +1220,55 @@ def conf(config_name):
 @app.route('/get_conf/<config_name>', methods=['GET'])
 def get_conf(config_name):
     """Get configuration details for a specific config"""
+    config_interface = read_conf_file_interface(config_name)
     search = request.args.get('search', '')
-    sort = request.args.get('sort', 'name')
     
-    # Get the configuration status
-    conf_status = get_conf_status(config_name)
+    # Parse the search query
+    search = urllib.parse.unquote(search)
     
-    # Get peer data with search and sort criteria
+    # Get configuration details
+    config = get_dashboard_conf()
+    sort = config.get("Server", "dashboard_sort", fallback="name")
+    peer_display_mode = config.get("Peers", "peer_display_mode", fallback="table")
+    
+    # Get address
+    if "Address" not in config_interface:
+        conf_address = "N/A"
+    else:
+        conf_address = config_interface['Address']
+    
+    # Get peer data
     peer_data = get_peers(config_name, search, sort)
     
-    # Get the total data transfer
+    # Get total data transfer
     total_data = get_conf_total_data(config_name)
     
-    return jsonify({
-        "status": conf_status,
+    # Build conf_data structure like before
+    conf_data = {
         "peer_data": peer_data,
+        "name": config_name,
+        "status": get_conf_status(config_name),
+        "total_data_usage": total_data,
+        "public_key": get_conf_pub_key(config_name),
+        "listen_port": get_conf_listen_port(config_name),
+        "running_peer": get_conf_running_peer_number(config_name),
+        "conf_address": conf_address,
         "total_rx": total_data["rx"],
         "total_tx": total_data["tx"]
-    })
+    }
+    
+    # Add checked status for UI
+    if conf_data['status'] == "stopped":
+        conf_data['checked'] = "nope"
+    else:
+        conf_data['checked'] = "checked"
+    
+    # Render the template like before
+    return render_template('get_conf.html', conf_data=conf_data, 
+                          wg_ip=config.get("Peers", "remote_endpoint"), 
+                          sort_tag=sort,
+                          dashboard_refresh_interval=int(config.get("Server", "dashboard_refresh_interval")), 
+                          peer_display_mode=peer_display_mode)
 
 # Turn on / off a configuration
 @app.route('/switch/<config_name>', methods=['GET'])
@@ -2028,3 +2045,88 @@ PersistentKeepalive = {peer_data.get('keepalive', '25')}
 """
     
     return config_str
+
+def get_wireguard_peers(config_name):
+    """Get peers directly from WireGuard"""
+    peers = []
+    
+    try:
+        # Get all public keys
+        keys = get_conf_peer_key(config_name)
+        if not isinstance(keys, list):
+            return []
+        
+        # Get handshake and transfer data
+        dump = get_conf_peer_data(config_name)
+        
+        # Process each peer
+        for key in keys:
+            peer = {"id": key}
+            
+            # Get allowed IPs
+            try:
+                allowed_ips = subprocess.check_output(
+                    f"wg show {config_name} allowed-ips | grep {key}",
+                    shell=True
+                ).decode('utf-8').strip()
+                
+                if allowed_ips:
+                    parts = allowed_ips.split("\t")
+                    if len(parts) > 1:
+                        peer["allowed_ip"] = parts[1].split(",")[0]
+            except:
+                peer["allowed_ip"] = ""
+            
+            # Get handshake and transfer data from dump
+            if key in dump:
+                peer_dump = dump[key]
+                peer["latest_handshake"] = peer_dump.get("latest_handshake", "Never")
+                peer["transfer_rx"] = peer_dump.get("transfer_rx", "0")
+                peer["transfer_tx"] = peer_dump.get("transfer_tx", "0")
+            else:
+                peer["latest_handshake"] = "Never"
+                peer["transfer_rx"] = "0"
+                peer["transfer_tx"] = "0"
+            
+            peers.append(peer)
+            
+        return peers
+    except Exception as e:
+        print(f"Error in get_wireguard_peers: {str(e)}")
+        return []
+
+def get_conf_peer_data(config_name):
+    """Get peer data from wireguard dump"""
+    try:
+        # Get dump from wireguard
+        dump = subprocess.check_output(
+            f"wg show {config_name} dump", 
+            shell=True
+        ).decode('utf-8').strip().split("\n")
+        
+        # Skip header
+        if len(dump) > 0:
+            dump = dump[1:]
+        
+        # Process dump
+        peers_data = {}
+        for line in dump:
+            peer_info = line.split("\t")
+            if len(peer_info) >= 6:
+                peer_id = peer_info[0]
+                
+                # Parse handshake - convert to timestamp if possible
+                handshake = peer_info[4]
+                if handshake == "0":
+                    handshake = "Never"
+                
+                peers_data[peer_id] = {
+                    "latest_handshake": handshake,
+                    "transfer_rx": peer_info[5],
+                    "transfer_tx": peer_info[6]
+                }
+        
+        return peers_data
+    except Exception as e:
+        print(f"Error in get_conf_peer_data: {str(e)}")
+        return {}
