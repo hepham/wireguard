@@ -1240,7 +1240,7 @@ def get_conf(config_name):
     # Get peer data
     peer_data = get_peers(config_name, search, sort)
     
-    # Get total data transfer
+    # Get total data transfer - returns [total, upload_total, download_total]
     total_data = get_conf_total_data(config_name)
     
     # Build conf_data structure like before
@@ -1253,8 +1253,8 @@ def get_conf(config_name):
         "listen_port": get_conf_listen_port(config_name),
         "running_peer": get_conf_running_peer_number(config_name),
         "conf_address": conf_address,
-        "total_rx": total_data["rx"],
-        "total_tx": total_data["tx"]
+        "total_rx": total_data[2],  # download_total
+        "total_tx": total_data[1]   # upload_total
     }
     
     # Add checked status for UI
@@ -1973,41 +1973,31 @@ def get_all_configs():
         return configs
 
 def get_conf_total_data(config_name):
-    """Get total data transfer for a configuration"""
-    # Get all peers
+    """Get total data usage for a configuration from Redis"""
+    r = get_redis_client()
+    if not r:
+        return [0, 0, 0]
+    
+    upload_total = 0
+    download_total = 0
+    
+    # Get all peers for this config
     peers = get_all_peers_from_redis(config_name)
     
-    # Calculate totals
-    total_rx = 0
-    total_tx = 0
-    
     for peer in peers:
-        try:
-            # Get transfer data
-            rx = peer.get('transfer_rx', '0')
-            tx = peer.get('transfer_tx', '0')
-            
-            # Convert to integers
-            if isinstance(rx, str) and rx:
-                rx = int(rx)
-            else:
-                rx = 0
-                
-            if isinstance(tx, str) and tx:
-                tx = int(tx)
-            else:
-                tx = 0
-                
-            # Add to totals
-            total_rx += rx
-            total_tx += tx
-        except Exception as e:
-            print(f"Error processing transfer data: {str(e)}")
+        upload_total += float(peer.get('total_sent', 0))
+        download_total += float(peer.get('total_receive', 0))
+        
+        # Add traffic from history
+        for traffic_entry in peer.get('traffic', []):
+            upload_total += float(traffic_entry.get('total_sent', 0))
+            download_total += float(traffic_entry.get('total_receive', 0))
     
-    return {
-        "rx": total_rx,
-        "tx": total_tx
-    }
+    total = round(upload_total + download_total, 4)
+    upload_total = round(upload_total, 4)
+    download_total = round(download_total, 4)
+    
+    return [total, upload_total, download_total]
 
 def generate_qrcode(config_name, peer_id):
     """Generate QR code for a peer"""
