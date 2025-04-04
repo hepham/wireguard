@@ -569,23 +569,23 @@ def checkKeyMatch(private_key, public_key, config_name):
     if result['status'] == 'failed':
         return result
     else:
-        db = DatabaseManager(f"db/{config_name}.json")
-        peers = Query()
-        match = db.db.search(peers.id == result['data'])
-        if len(match) != 1 or result['data'] != public_key:
-            return {'status': 'failed', 'msg': 'Please check your private key, it does not match with the public key.'}
-        else:
-            return {'status': 'success'}
+        with DatabaseManager(f'db/{config_name}.json') as db:
+            peers = Query()
+            match = db.search(peers.id == result['data'])
+            if len(match) != 1 or result['data'] != public_key:
+                return {'status': 'failed', 'msg': 'Please check your private key, it does not match with the public key.'}
+            else:
+                return {'status': 'success'}
 
 # Check if there is repeated allowed IP
 def check_repeat_allowed_IP(public_key, ip, config_name):
     with DatabaseManager(f"db/{config_name}.json") as db:
         peers = Query()
-        peer = db.db.search(peers.id == public_key)
+        peer = db.search(peers.id == public_key)
         if len(peer) != 1:
             return {'status': 'failed', 'msg': 'Peer does not exist'}
         else:
-            existed_ip = db.db.search((peers.id != public_key) & (peers.allowed_ip == ip))
+            existed_ip = db.search((peers.id != public_key) & (peers.allowed_ip == ip))
             if len(existed_ip) != 0:
                 return {'status': 'failed', 'msg': "Allowed IP already taken by another peer."}
             else:
@@ -987,7 +987,7 @@ def save_peer_setting(config_name):
     
     with DatabaseManager(f"db/{config_name}.json") as db:
         peers = Query()
-        if len(db.db.search(peers.id == id)) == 1:
+        if len(db.search(peers.id == id)) == 1:
             check_ip = check_repeat_allowed_IP(id, allowed_ip, config_name)
             if not check_IP_with_range(endpoint_allowed_ip):
                 return jsonify({"status": "failed", "msg": "Endpoint Allowed IPs format is incorrect."})
@@ -1017,7 +1017,7 @@ def save_peer_setting(config_name):
                                                         stderr=subprocess.STDOUT)
                 if change_ip.decode("UTF-8") != "":
                     return jsonify({"status": "failed", "msg": change_ip.decode("UTF-8")})
-                db.db.update(
+                db.update(
                     {"name": name, "private_key": private_key,
                     "DNS": DNS, "endpoint_allowed_ip": endpoint_allowed_ip,
                     "mtu": data['MTU'],
@@ -1037,7 +1037,7 @@ def get_peer_name(config_name):
     
     with DatabaseManager(f"db/{config_name}.json") as db:
         peers = Query()
-        result = db.db.search(peers.id == id)
+        result = db.search(peers.id == id)
         
         if not result:
             return jsonify({"status": "failed", "msg": "Peer not found"})
@@ -1080,7 +1080,7 @@ def download(config_name):
     
     with DatabaseManager(f"db/{config_name}.json") as db:
         peers = Query()
-        get_peer = db.db.search(peers.id == id)
+        get_peer = db.search(peers.id == id)
         config = get_dashboard_conf()
         if len(get_peer) == 1:
             peer = get_peer[0]
@@ -1136,19 +1136,19 @@ Dashboard Tools Related
 @app.route('/get_ping_ip', methods=['POST'])
 def get_ping_ip():
     config = request.form['config']
-    db = DatabaseManager(f"db/{config}.json")
     html = ""
-    for i in db.db.all():
-        html += '<optgroup label="' + i['name'] + ' - ' + i['id'] + '">'
-        allowed_ip = str(i['allowed_ip']).split(",")
-        for k in allowed_ip:
-            k = k.split("/")
-            if len(k) == 2:
-                html += "<option value=" + k[0] + ">" + k[0] + "</option>"
-        endpoint = str(i['endpoint']).split(":")
-        if len(endpoint) == 2:
-            html += "<option value=" + endpoint[0] + ">" + endpoint[0] + "</option>"
-        html += "</optgroup>"
+    with DatabaseManager(f"db/{config}.json") as db:
+        for i in db.all():
+            html += '<optgroup label="' + i['name'] + ' - ' + i['id'] + '">'
+            allowed_ip = str(i['allowed_ip']).split(",")
+            for k in allowed_ip:
+                k = k.split("/")
+                if len(k) == 2:
+                    html += "<option value=" + k[0] + ">" + k[0] + "</option>"
+            endpoint = str(i['endpoint']).split(":")
+            if len(endpoint) == 2:
+                html += "<option value=" + endpoint[0] + ">" + endpoint[0] + "</option>"
+            html += "</optgroup>"
     return html
 
 # Ping IP
@@ -1206,7 +1206,7 @@ def create_client(config_name):
         checkExist=False
         config_content=""
         
-        for peer in db.db.all():
+        for peer in db.all():
             if peer["name"]==data["name"]:
                 config_content = f"""# {peer['name']}
                 [Interface]
@@ -1235,7 +1235,7 @@ def create_client(config_name):
             # 2. Tạo allowed_ips dạng 10.66.66.xx/32
             existing_ips = [
                 int(peer['allowed_ip'].split('.')[3].split('/')[0])
-                for peer in db.db.all()
+                for peer in db.all()
                 if 'allowed_ip' in peer and peer['allowed_ip'].startswith(BASE_IP)
             ]
             
@@ -1247,7 +1247,7 @@ def create_client(config_name):
             allowed_ips = f"{BASE_IP}.{next_ip}/32"
 
             # 3. Kiểm tra IP trùng
-            if db.db.search(peers.allowed_ips == allowed_ips):
+            if db.search(peers.allowed_ips == allowed_ips):
                 return jsonify({"error": "IP đã tồn tại"}), 409
                 
             try:
@@ -1267,7 +1267,7 @@ def create_client(config_name):
             endpoint = config.get("Peers","remote_endpoint") + ":" + listen_port
             
             try:
-                db.db.update({"name": data['name'], "private_key": private_key, "DNS": DEFAULT_DNS,"public_key":public_key,
+                db.update({"name": data['name'], "private_key": private_key, "DNS": DEFAULT_DNS,"public_key":public_key,
                 "endpoint_allowed_ip": endpoint,"allowed-ips":allowed_ips},
                 peers.id == public_key_ip)
             except Exception as e:
