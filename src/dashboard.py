@@ -1,5 +1,5 @@
 import os
-from flask import Flask, request, render_template, redirect, url_for, session, abort, jsonify, make_response
+from flask import Flask, request, render_template, redirect, url_for, session, abort, jsonify, make_response, Response
 import subprocess
 from datetime import datetime, date, time, timedelta
 import time
@@ -13,6 +13,7 @@ import threading
 # PIP installed library
 import ifcfg
 from flask_qrcode import QRcode
+import requests
 # Thay thế TinyDB bằng sqlite3
 import sqlite3
 from icmplib import ping, multiping, traceroute, resolve, Host, Hop
@@ -48,30 +49,39 @@ def init_db_for_config(config_name):
     db_path = get_db_path(config_name)
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    # Tạo bảng peers nếu chưa tồn tại
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS peers (
-        id TEXT PRIMARY KEY,
-        name TEXT DEFAULT '',
-        private_key TEXT DEFAULT '',
-        DNS TEXT,
-        endpoint_allowed_ip TEXT,
-        allowed_ip TEXT DEFAULT 'N/A',
-        status TEXT DEFAULT 'stopped',
-        latest_handshake TEXT DEFAULT 'N/A',
-        endpoint TEXT DEFAULT 'N/A',
-        total_receive REAL DEFAULT 0,
-        total_sent REAL DEFAULT 0,
-        total_data REAL DEFAULT 0,
-        mtu TEXT,
-        keepalive TEXT,
-        remote_endpoint TEXT,
-        public_key TEXT DEFAULT '',
-        traffic TEXT DEFAULT '[]'
-    )
-    ''')
-    conn.commit()
-    conn.close()
+    try:
+        # Tạo bảng peers nếu chưa tồn tại
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS peers (
+            id TEXT PRIMARY KEY,
+            name TEXT DEFAULT '',
+            private_key TEXT DEFAULT '',
+            DNS TEXT,
+            endpoint_allowed_ip TEXT,
+            allowed_ip TEXT DEFAULT 'N/A',
+            status TEXT DEFAULT 'stopped',
+            latest_handshake TEXT DEFAULT 'N/A',
+            endpoint TEXT DEFAULT 'N/A',
+            total_receive REAL DEFAULT 0,
+            total_sent REAL DEFAULT 0,
+            total_data REAL DEFAULT 0,
+            mtu TEXT,
+            keepalive TEXT,
+            remote_endpoint TEXT,
+            public_key TEXT DEFAULT '',
+            traffic TEXT DEFAULT '[]',
+            allowed_ips TEXT DEFAULT ''
+        )
+        ''')
+        conn.commit()
+        # Verify table was created
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='peers'")
+        if not cursor.fetchone():
+            print(f"Warning: peers table was not created successfully for {config_name}")
+    except sqlite3.Error as e:
+        print(f"Database error during initialization: {e}")
+    finally:
+        conn.close()
 
 def dict_factory(cursor, row):
     """Chuyển đổi row thành dictionary để tương thích với TinyDB"""
@@ -83,6 +93,9 @@ def dict_factory(cursor, row):
 def cleanup_inactive_peers(config_name='wg0', threshold=180):
     """Xóa các peer không hoạt động trong 3 phút"""
     try:
+        # Đảm bảo database đã được khởi tạo
+        init_db_for_config(config_name)
+        
         # Lấy danh sách peer hiện tại từ WireGuard
         dump = subprocess.check_output(
             ['wg', 'show', config_name, 'dump'],
@@ -105,34 +118,51 @@ def cleanup_inactive_peers(config_name='wg0', threshold=180):
         current_time = int(time.time())
 
         # Lấy tất cả các peers
-        cursor.execute("SELECT id, doc_id FROM peers")
-        all_peers = cursor.fetchall()
+        try:
+            # Kiểm tra xem bảng peers có tồn tại không
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='peers'")
+            if not cursor.fetchone():
+                print(f"Table 'peers' does not exist for {config_name}, creating it now")
+                conn.close()
+                init_db_for_config(config_name)
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+            
+            cursor.execute("SELECT id FROM peers")
+            all_peers = cursor.fetchall()
 
-        for peer_id, doc_id in all_peers:
-            handshake_time = active_peers.get(peer_id, 0)
+            for peer_id in [p[0] for p in all_peers]:
+                handshake_time = active_peers.get(peer_id, 0)
 
-            # Kiểm tra thời gian không hoạt động
-            if handshake_time == 0 or (current_time - handshake_time) > threshold:
-                try:
-                    # Xóa khỏi WireGuard
-                    subprocess.check_call([
-                        'wg', 'set', 
-                        config_name, 
-                        'peer', 
-                        peer_id, 
-                        'remove'
-                    ])
-                    
-                    # Xóa khỏi database
-                    cursor.execute("DELETE FROM peers WHERE id = ?", (peer_id,))
-                    
-                except Exception as e:
-                    print(f"error delete peer {peer_id}: {str(e)}")
+                # Kiểm tra thời gian không hoạt động
+                if handshake_time == 0 or (current_time - handshake_time) > threshold:
+                    try:
+                        # Xóa khỏi WireGuard
+                        subprocess.check_call([
+                            'wg', 'set', 
+                            config_name, 
+                            'peer', 
+                            peer_id, 
+                            'remove'
+                        ])
+                        
+                        # Xóa khỏi database
+                        cursor.execute("DELETE FROM peers WHERE id = ?", (peer_id,))
+                        
+                    except Exception as e:
+                        print(f"error delete peer {peer_id}: {str(e)}")
 
-        # Lưu cấu hình và đóng DB
-        subprocess.check_call(['wg-quick', 'save', config_name])
-        conn.commit()
-        conn.close()
+            # Lưu cấu hình và đóng DB
+            subprocess.check_call(['wg-quick', 'save', config_name])
+        except sqlite3.OperationalError as e:
+            print(f"Database error: {str(e)}")
+            # Thử khởi tạo lại bảng nếu không tồn tại
+            if "no such table" in str(e):
+                print(f"Recreating table peers for {config_name}")
+                init_db_for_config(config_name)
+        finally:
+            conn.commit()
+            conn.close()
 
     except Exception as e:
         print(f"error cleanup: {str(e)}")
@@ -1382,150 +1412,247 @@ def traceroute_ip():
 
 @app.route('/create_client/<config_name>', methods=['POST'])
 def create_client(config_name):
-    cleanup_inactive_peers()
+    """Tạo máy khách mới và trả về tập tin cấu hình."""
+    # Khởi tạo database cho cấu hình trước
+    init_db_for_config(config_name)
     
+    # Xóa các máy khách không hoạt động
+    cleanup_inactive_peers(config_name)
+
+    # Lấy dữ liệu từ form
+    data = request.form.to_dict()
+    if "dns" not in data:
+        data["dns"] = get_default_dns()
+
+    if "name" not in data or data["name"] == "":
+        data["name"] = generate_random_name()
+
+    # Kết nối đến database
     db_path = get_db_path(config_name)
     conn = sqlite3.connect(db_path)
     conn.row_factory = dict_factory
     cursor = conn.cursor()
-    
-    data = request.get_json()
-    keys = get_conf_peer_key(config_name)
-    private_key=""
-    public_key=""
-    checkExist=False
-    config_content=""
-    
-    # Kiểm tra peer có tồn tại
-    cursor.execute("SELECT * FROM peers WHERE name = ?", (data["name"],))
-    peer = cursor.fetchone()
-    
-    if peer:
-        # Peer đã tồn tại
-        config_content = f"""# {peer['name']}
-            [Interface]
-            PrivateKey = {peer['private_key']}
-            Address = {peer['allowed_ip']}
-            DNS = {DEFAULT_DNS}
 
-            [Peer]
-            PublicKey = {peer['public_key']}
-            Endpoint = {peer['endpoint_allowed_ip']}
-            AllowedIPs = 0.0.0.0/0
-            PersistentKeepalive = {data.get('keep_alive', 21)}
-            """
-        checkExist=True
-    
-    if not checkExist:
-        check = False
-        while not check:
-            key = gen_private_key()
-            private_key = key["private_key"]
-            public_key = key["public_key"]
-            if len(public_key) != 0 and public_key not in keys:
-                check = True
-        
-        # Tìm IP địa chỉ tiếp theo
-        cursor.execute("SELECT allowed_ip FROM peers WHERE allowed_ip LIKE ?", (f"{BASE_IP}.%",))
-        existing_ips = []
-        
-        for row in cursor.fetchall():
-            try:
-                ip_part = row['allowed_ip'].split('.')[3].split('/')[0]
-                existing_ips.append(int(ip_part))
-            except:
-                pass
-        
-        next_ip=2
-        for ip in range(2,255,1):
-            if ip not in existing_ips:
-                next_ip = ip
-                break
-                
-        allowed_ips = f"{BASE_IP}.{next_ip}/32"
-        print("--------------------------------")
-        print("existing_ips:", existing_ips)
-        print("ip allowed_ip:", allowed_ips)
-        print("------------------------------")
-
-        # Kiểm tra IP trùng
-        cursor.execute("SELECT COUNT(*) FROM peers WHERE allowed_ip = ?", (allowed_ips,))
-        if cursor.fetchone()[0] > 0:
+    try:
+        # Kiểm tra lại bảng có tồn tại không
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='peers'")
+        if not cursor.fetchone():
+            print(f"Table 'peers' still doesn't exist, creating it now in create_client")
             conn.close()
-            return jsonify({"error": "IP đã tồn tại"}), 409
-            
-        try:
-            status = subprocess.check_output(
-                "wg set " + config_name + " peer " + public_key + " allowed-ips " + allowed_ips, shell=True,
-                stderr=subprocess.STDOUT)
-            status = subprocess.check_output("wg-quick save " + config_name, shell=True, stderr=subprocess.STDOUT)
-            get_all_peers_data(config_name)
+            init_db_for_config(config_name)
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = dict_factory
+            cursor = conn.cursor()
 
-        except subprocess.CalledProcessError as exc:
-            conn.close()
-            return exc.output.strip()
-        
-        public_key_ip = public_key
-        public_key = get_conf_pub_key(config_name)
-        listen_port = get_conf_listen_port(config_name)
-        config = get_dashboard_conf()
-        endpoint = config.get("Peers","remote_endpoint") + ":" + listen_port
-        
-        try:
-            cursor.execute("""
-                UPDATE peers 
-                SET name = ?, private_key = ?, DNS = ?, public_key = ?, endpoint_allowed_ip = ?, allowed_ip = ?
-                WHERE id = ?
-            """, (
-                data['name'], private_key, DEFAULT_DNS, public_key, 
-                endpoint, allowed_ips, public_key_ip
-            ))
-            conn.commit()
-        except Exception as exc:
-            print(f"Error updating peer: {str(exc)}")
-            
-        filename = data["name"]
-        if len(filename) == 0:
-            filename = "Untitled_Peers"
+        # Kiểm tra xem tên đã tồn tại chưa
+        cursor.execute("SELECT * FROM peers WHERE name = ?", (data["name"],))
+        if cursor.fetchone():
+            return jsonify({"error": "Client name already exists."})
+
+        # Tạo khóa mới nếu cần
+        if "private_key" in data and "id" in data and data["private_key"] != "" and data["id"] != "":
+            if not check_key_match(data["private_key"], data["id"]):
+                return jsonify({"error": "Private key doesn't match with Public key."})
         else:
-            filename = data["name"]
-            # Clean filename
-            illegal_filename = [".", ",", "/", "?", "<", ">", "\\", ":", "*", '|' '\"', "com1", "com2", "com3",
-                            "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4",
-                        "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "con", "nul", "prn"]
-            for i in illegal_filename:
-                filename = filename.replace(i, "")
-            if len(filename) == 0:
-                filename = "Untitled_Peer"
-            filename = "".join(filename.split(' '))
-            filename = filename + "_" + config_name
+            private_key = subprocess.check_output(["wg", "genkey"], text=True).strip()
+            public_key = subprocess.check_output(["wg", "pubkey"], text=True, input=private_key).strip()
+            data["private_key"] = private_key
+            data["id"] = public_key
+
+        # Kiểm tra xem public key đã có chưa
+        cursor.execute("SELECT * FROM peers WHERE id = ?", (data["id"],))
+        if cursor.fetchone():
+            return jsonify({"error": "Public key (id) already exists."})
+
+        # Xác định IP được phép
+        if "allowed_ips" not in data or data["allowed_ips"] == "":
+            # Lấy danh sách IP đã dùng
+            cursor.execute("SELECT allowed_ips FROM peers")
+            used_ips = []
+            for peer_data in cursor.fetchall():
+                if peer_data.get("allowed_ips"):
+                    used_ips.extend(peer_data["allowed_ips"].split(","))
+
+            # Loại bỏ subnet mask và tạo IPs từ mạng được cấu hình
+            server_settings = get_server_config(config_name)
+            network = '.'.join(server_settings["Address"].split('.')[:-1])
             
-        # Tạo config
-        config_content = f"""# {data['name']}
-                [Interface]
-                PrivateKey = {private_key}
-                Address = {allowed_ips}
-                DNS = {DEFAULT_DNS}
+            # Tìm IP khả dụng tiếp theo
+            for i in range(2, 255):
+                candidate_ip = f"{network}.{i}/32"
+                if candidate_ip not in used_ips:
+                    data["allowed_ips"] = candidate_ip
+                    break
+            else:
+                return jsonify({"error": "No available IPs in range."})
 
-                [Peer]
-                PublicKey = {public_key}
-                Endpoint ={endpoint}
-                AllowedIPs = 0.0.0.0/0
-                PersistentKeepalive = {data.get('keep_alive', 25)}
-                """
+        # Thêm peer vào database
+        now = int(time.time())
+        data.setdefault("traffic", json.dumps([0, 0]))
+        data.setdefault("name", generate_random_name())
+        data.setdefault("created", now)
+        data.setdefault("endpoint", "")
+        data.setdefault("latest_handshake", 0)
+        
+        # Chuẩn bị câu lệnh SQL INSERT
+        fields = ", ".join(data.keys())
+        placeholders = ", ".join(["?"] * len(data))
+        
+        cursor.execute(
+            f"INSERT INTO peers ({fields}) VALUES ({placeholders})",
+            tuple(data.values())
+        )
+        conn.commit()
 
-    conn.close()
-    
-    # Trả về file config
-    response = make_response(config_content)
-    response.headers['Content-Disposition'] = \
-            f'attachment; filename="{data["name"]}_wg.conf"'
-    return response
+        # Lấy thông tin server
+        server_settings = get_server_config(config_name)
+        server_public_key = get_server_pubkey(config_name)
+        
+        # Thêm peer vào WireGuard
+        subprocess.check_call([
+            "wg", "set", config_name,
+            "peer", data["id"],
+            "allowed-ips", data["allowed_ips"]
+        ])
+        
+        # Lưu cấu hình WireGuard
+        subprocess.check_call(["wg-quick", "save", config_name])
+
+        # Tạo cấu hình client
+        config = f"""[Interface]
+PrivateKey = {data['private_key']}
+Address = {data['allowed_ips'].split('/')[0]}/24
+DNS = {data['dns']}
+
+[Peer]
+PublicKey = {server_public_key}
+AllowedIPs = {server_settings.get('AllowedIPs', '0.0.0.0/0')}
+Endpoint = {server_settings['Endpoint']}
+"""
+        
+        # Trả về tệp tin cấu hình
+        response = Response(
+            config,
+            mimetype="text/plain",
+            headers={"Content-disposition": f"attachment; filename={data['name']}.conf"}
+        )
+        return response
+
+    except sqlite3.OperationalError as e:
+        conn.rollback()
+        print(f"Database error in create_client: {str(e)}")
+        if "no such table" in str(e):
+            # Thử khởi tạo lại database và bảng
+            conn.close()
+            init_db_for_config(config_name)
+            return jsonify({"error": "Database was just initialized. Please try again."})
+        return jsonify({"error": f"Database error: {str(e)}"})
+    except Exception as e:
+        conn.rollback()
+        print(f"Error creating client: {str(e)}")
+        return jsonify({"error": f"Failed to create client: {str(e)}"})
+        
+    finally:
+        conn.close()
 
 def get_public_ip():
     response = requests.get("https://ifconfig.me")
     print(response.text)
     return response.text.strip()
+
+def check_key_match(private_key, public_key):
+    """Kiểm tra xem private key có khớp với public key không"""
+    try:
+        generated_pubkey = subprocess.check_output(
+            ["wg", "pubkey"], 
+            input=private_key.encode(), 
+            text=True
+        ).strip()
+        return generated_pubkey == public_key
+    except Exception as e:
+        print(f"Error checking key match: {str(e)}")
+        return False
+
+
+def get_default_dns():
+    """Trả về DNS mặc định cho client"""
+    try:
+        # Đọc từ cấu hình nếu có
+        return "1.1.1.1, 8.8.8.8"
+    except:
+        # Giá trị mặc định
+        return "1.1.1.1, 8.8.8.8"
+
+
+def generate_random_name():
+    """Tạo tên ngẫu nhiên cho client"""
+    import random
+    import string
+    prefix = "client"
+    suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    return f"{prefix}-{suffix}"
+
+
+def get_server_pubkey(config_name):
+    """Lấy khóa công khai của server"""
+    try:
+        output = subprocess.check_output(
+            ["wg", "show", config_name, "public-key"],
+            text=True
+        ).strip()
+        return output
+    except Exception as e:
+        print(f"Error getting server public key: {str(e)}")
+        return ""
+
+
+def get_server_config(config_name):
+    """Lấy cấu hình server"""
+    try:
+        server_info = {}
+        
+        # Lấy địa chỉ IP của server
+        address_output = subprocess.check_output(
+            ["wg", "show", config_name, "listen-port"],
+            text=True
+        ).strip()
+        
+        # Lấy cấu hình interface 
+        ifconfig = subprocess.check_output(
+            ["ip", "-o", "-4", "addr", "show", config_name],
+            text=True
+        ).strip()
+        
+        # Parse địa chỉ IP
+        parts = ifconfig.split()
+        address = None
+        for i, part in enumerate(parts):
+            if part == "inet":
+                address = parts[i+1]
+                break
+        
+        if address:
+            server_info["Address"] = address.split('/')[0]
+        
+        # Lấy port
+        server_info["ListenPort"] = address_output
+        
+        # Lấy endpoint
+        public_ip = get_public_ip()
+        server_info["Endpoint"] = f"{public_ip}:{address_output}"
+        
+        # Lấy AllowedIPs (mặc định là tất cả traffic)
+        server_info["AllowedIPs"] = "0.0.0.0/0"
+        
+        return server_info
+    except Exception as e:
+        print(f"Error getting server config: {str(e)}")
+        return {
+            "Address": "10.0.0.1/24",
+            "ListenPort": "51820",
+            "Endpoint": "example.com:51820",
+            "AllowedIPs": "0.0.0.0/0"
+        }
 
 """
 Dashboard Initialization
