@@ -1,0 +1,4 @@
+flask==2.0.1
+waitress==2.0.0
+configparser==5.0.2
+redis==4.5.1 

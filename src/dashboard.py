@@ -1,5 +1,5 @@
 import os
-from flask import Flask, request, render_template, redirect, url_for, session, abort, jsonify, make_response, Response
+from flask import Flask, request, render_template, redirect, url_for, session, abort, jsonify, make_response
 import subprocess
 from datetime import datetime, date, time, timedelta
 import time
@@ -13,9 +13,8 @@ import threading
 # PIP installed library
 import ifcfg
 from flask_qrcode import QRcode
-import requests
-# Thay thế TinyDB bằng sqlite3
-import sqlite3
+# Replace TinyDB with Redis
+import redis
 from icmplib import ping, multiping, traceroute, resolve, Host, Hop
 # Dashboard Version
 dashboard_version = 'v2.3.1'
@@ -35,67 +34,172 @@ QRcode(app)
 app.secret_key = secrets.token_urlsafe(16)
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 
-# SQLite Utility Functions
-def get_db_path(config_name):
-    """Trả về đường dẫn đến file database SQLite"""
-    db_dir = "db"
-    # Đảm bảo thư mục tồn tại
-    if not os.path.exists(db_dir):
-        os.makedirs(db_dir)
-    return os.path.join(db_dir, f"{config_name}.db")
+# Redis configuration
+REDIS_HOST = 'localhost'
+REDIS_PORT = 6379
+REDIS_DB = 0
+REDIS_PASSWORD = None  # Set to None if no password is required
+REDIS_CLIENT = None
+REDIS_LOCK = threading.Lock()
 
-def init_db_for_config(config_name):
-    """Khởi tạo database SQLite cho một config nếu chưa tồn tại"""
-    db_path = get_db_path(config_name)
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    try:
-        # Tạo bảng peers nếu chưa tồn tại
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS peers (
-            id TEXT PRIMARY KEY,
-            name TEXT DEFAULT '',
-            private_key TEXT DEFAULT '',
-            DNS TEXT,
-            endpoint_allowed_ip TEXT,
-            allowed_ip TEXT DEFAULT 'N/A',
-            status TEXT DEFAULT 'stopped',
-            latest_handshake TEXT DEFAULT 'N/A',
-            endpoint TEXT DEFAULT 'N/A',
-            total_receive REAL DEFAULT 0,
-            total_sent REAL DEFAULT 0,
-            total_data REAL DEFAULT 0,
-            mtu TEXT,
-            keepalive TEXT,
-            remote_endpoint TEXT,
-            public_key TEXT DEFAULT '',
-            traffic TEXT DEFAULT '[]',
-            allowed_ips TEXT DEFAULT ''
-        )
-        ''')
-        conn.commit()
-        # Verify table was created
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='peers'")
-        if not cursor.fetchone():
-            print(f"Warning: peers table was not created successfully for {config_name}")
-    except sqlite3.Error as e:
-        print(f"Database error during initialization: {e}")
-    finally:
-        conn.close()
+# Keys for Redis
+def get_peer_key(config_name, peer_id):
+    """Get Redis key for a peer"""
+    return f"wireguard:{config_name}:peer:{peer_id}"
 
-def dict_factory(cursor, row):
-    """Chuyển đổi row thành dictionary để tương thích với TinyDB"""
-    d = {}
-    for idx, col in enumerate(cursor.description):
-        d[col[0]] = row[idx]
-    return d
+def get_config_key(config_name):
+    """Get Redis key for a configuration"""
+    return f"wireguard:{config_name}:config"
+
+def get_peers_set_key(config_name):
+    """Get Redis key for the set of peer IDs"""
+    return f"wireguard:{config_name}:peers"
+
+def get_last_seen_key(config_name, peer_id):
+    """Get Redis key for peer's last seen timestamp"""
+    return f"wireguard:{config_name}:last_seen:{peer_id}"
+
+def get_redis_client():
+    """Get or create a Redis client"""
+    global REDIS_CLIENT
+    
+    with REDIS_LOCK:
+        if REDIS_CLIENT is None:
+            try:
+                REDIS_CLIENT = redis.Redis(
+                    host=REDIS_HOST,
+                    port=REDIS_PORT,
+                    db=REDIS_DB,
+                    password=REDIS_PASSWORD,
+                    decode_responses=True  # Automatically decode responses to strings
+                )
+                # Test the connection
+                REDIS_CLIENT.ping()
+            except redis.ConnectionError as e:
+                print(f"Error connecting to Redis: {e}")
+                REDIS_CLIENT = None
+    
+    return REDIS_CLIENT
+
+def get_peer_from_redis(config_name, peer_id):
+    """Get a peer from Redis"""
+    r = get_redis_client()
+    if not r:
+        return None
+    
+    peer_key = get_peer_key(config_name, peer_id)
+    if not r.exists(peer_key):
+        return None
+    
+    peer_data = r.hgetall(peer_key)
+    if not peer_data:
+        return None
+    
+    # Add the ID to the data
+    peer_data['id'] = peer_id
+    
+    return peer_data
+
+def get_all_peers_from_redis(config_name):
+    """Get all peers for a configuration from Redis"""
+    r = get_redis_client()
+    if not r:
+        return []
+    
+    # Get all peer IDs from the set
+    peers_set_key = get_peers_set_key(config_name)
+    peer_ids = r.smembers(peers_set_key)
+    
+    peers = []
+    for peer_id in peer_ids:
+        peer_data = get_peer_from_redis(config_name, peer_id)
+        if peer_data:
+            peers.append(peer_data)
+    
+    return peers
+
+def save_peer_to_redis(config_name, peer_id, peer_data):
+    """Save a peer to Redis"""
+    r = get_redis_client()
+    if not r:
+        return False
+    
+    # Add to the set of peers
+    peers_set_key = get_peers_set_key(config_name)
+    r.sadd(peers_set_key, peer_id)
+    
+    # Save the peer data
+    peer_key = get_peer_key(config_name, peer_id)
+    r.hset(peer_key, mapping=peer_data)
+    
+    # Update last seen
+    last_seen_key = get_last_seen_key(config_name, peer_id)
+    r.set(last_seen_key, int(time.time()))
+    
+    return True
+
+def delete_peer_from_redis(config_name, peer_id):
+    """Delete a peer from Redis"""
+    r = get_redis_client()
+    if not r:
+        return False
+    
+    # Remove from the set of peers
+    peers_set_key = get_peers_set_key(config_name)
+    r.srem(peers_set_key, peer_id)
+    
+    # Delete the peer data
+    peer_key = get_peer_key(config_name, peer_id)
+    r.delete(peer_key)
+    
+    # Delete last seen
+    last_seen_key = get_last_seen_key(config_name, peer_id)
+    r.delete(last_seen_key)
+    
+    return True
+
+def update_peer_last_seen(config_name, peer_id):
+    """Update the last seen timestamp for a peer"""
+    r = get_redis_client()
+    if not r:
+        return False
+    
+    last_seen_key = get_last_seen_key(config_name, peer_id)
+    r.set(last_seen_key, int(time.time()))
+    
+    return True
+
+def should_update_db(config_name):
+    """Check if database should be updated (every 5 minutes)"""
+    current_time = time.time()
+    if config_name not in last_db_update:
+        last_db_update[config_name] = 0
+        return True
+    
+    # Update every 5 minutes (300 seconds)
+    if current_time - last_db_update[config_name] >= 300:
+        last_db_update[config_name] = current_time
+        return True
+    return False
+
+def search_peers_in_redis(config_name, search_term=None, sort_field=None):
+    """Search for peers in Redis with optional filtering and sorting"""
+    peers = get_all_peers_from_redis(config_name)
+    
+    # Filter by search term if provided
+    if search_term:
+        search_term = search_term.lower()
+        peers = [p for p in peers if search_term in p.get('name', '').lower()]
+    
+    # Sort if specified
+    if sort_field and peers:
+        peers.sort(key=lambda p: p.get(sort_field, ''))
+    
+    return peers
 
 def cleanup_inactive_peers(config_name='wg0', threshold=180):
     """Xóa các peer không hoạt động trong 3 phút"""
     try:
-        # Đảm bảo database đã được khởi tạo
-        init_db_for_config(config_name)
-        
         # Lấy danh sách peer hiện tại từ WireGuard
         dump = subprocess.check_output(
             ['wg', 'show', config_name, 'dump'],
@@ -111,61 +215,186 @@ def cleanup_inactive_peers(config_name='wg0', threshold=180):
                 last_handshake = int(parts[4])
                 active_peers[pubkey] = last_handshake
 
-        # Xử lý database
-        db_path = get_db_path(config_name)
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
+        # Get Redis connection
+        r = get_redis_client()
+        if not r:
+            print("Redis connection not available")
+            return
+
+        # Get all peer IDs for this config
+        peers_key = get_peers_set_key(config_name)
+        peer_ids = r.smembers(peers_key)
         current_time = int(time.time())
 
-        # Lấy tất cả các peers
-        try:
-            # Kiểm tra xem bảng peers có tồn tại không
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='peers'")
-            if not cursor.fetchone():
-                print(f"Table 'peers' does not exist for {config_name}, creating it now")
-                conn.close()
-                init_db_for_config(config_name)
-                conn = sqlite3.connect(db_path)
-                cursor = conn.cursor()
-            
-            cursor.execute("SELECT id FROM peers")
-            all_peers = cursor.fetchall()
+        for peer_id in peer_ids:
+            handshake_time = active_peers.get(peer_id, 0)
 
-            for peer_id in [p[0] for p in all_peers]:
-                handshake_time = active_peers.get(peer_id, 0)
+            # Kiểm tra thời gian không hoạt động
+            if handshake_time == 0 or (current_time - handshake_time) > threshold:
+                try:
+                    # Xóa khỏi WireGuard
+                    subprocess.check_call([
+                        'wg', 'set', 
+                        config_name, 
+                        'peer', 
+                        peer_id, 
+                        'remove'
+                    ])
+                    
+                    # Xóa khỏi Redis
+                    delete_peer_from_redis(config_name, peer_id)
+                    
+                except Exception as e:
+                    print(f"error delete peer {peer_id}: {str(e)}")
 
-                # Kiểm tra thời gian không hoạt động
-                if handshake_time == 0 or (current_time - handshake_time) > threshold:
-                    try:
-                        # Xóa khỏi WireGuard
-                        subprocess.check_call([
-                            'wg', 'set', 
-                            config_name, 
-                            'peer', 
-                            peer_id, 
-                            'remove'
-                        ])
-                        
-                        # Xóa khỏi database
-                        cursor.execute("DELETE FROM peers WHERE id = ?", (peer_id,))
-                        
-                    except Exception as e:
-                        print(f"error delete peer {peer_id}: {str(e)}")
-
-            # Lưu cấu hình và đóng DB
-            subprocess.check_call(['wg-quick', 'save', config_name])
-        except sqlite3.OperationalError as e:
-            print(f"Database error: {str(e)}")
-            # Thử khởi tạo lại bảng nếu không tồn tại
-            if "no such table" in str(e):
-                print(f"Recreating table peers for {config_name}")
-                init_db_for_config(config_name)
-        finally:
-            conn.commit()
-            conn.close()
+        # Lưu cấu hình
+        subprocess.check_call(['wg-quick', 'save', config_name])
 
     except Exception as e:
         print(f"error cleanup: {str(e)}")
+
+# Get latest handshake from all peers of a configuration
+def get_latest_handshake(config_name):
+    # Get latest handshakes
+    try:
+        data_usage = subprocess.check_output("wg show " + config_name + " latest-handshakes", shell=True)
+    except Exception:
+        return "stopped"
+    
+    r = get_redis_client()
+    if not r:
+        return "redis not available"
+    
+    data_usage = data_usage.decode("UTF-8").split()
+    count = 0
+    now = datetime.now()
+    b = timedelta(minutes=2)
+    
+    for i in range(int(len(data_usage) / 2)):
+        public_key = data_usage[count]
+        handshake_time = int(data_usage[count + 1])
+        
+        minus = now - datetime.fromtimestamp(handshake_time)
+        if minus < b:
+            status = "running"
+        else:
+            status = "stopped"
+        
+        # Get peer key
+        peer_key = get_peer_key(config_name, public_key)
+        
+        # Update handshake and status
+        if handshake_time > 0:
+            r.hset(peer_key, "latest_handshake", str(minus).split(".")[0])
+            r.hset(peer_key, "status", status)
+        else:
+            r.hset(peer_key, "latest_handshake", "(None)")
+            r.hset(peer_key, "status", status)
+        
+        count += 2
+
+# Get transfer from all peers of a configuration
+def get_transfer(config_name):
+    # Get transfer
+    try:
+        data_usage = subprocess.check_output("wg show " + config_name + " transfer", shell=True)
+    except Exception:
+        return "stopped"
+    
+    r = get_redis_client()
+    if not r:
+        return "redis not available"
+    
+    data_usage = data_usage.decode("UTF-8").split()
+    count = 0
+    
+    for i in range(int(len(data_usage) / 3)):
+        public_key = data_usage[count]
+        peer_key = get_peer_key(config_name, public_key)
+        
+        # Check if peer exists
+        if not r.exists(peer_key):
+            count += 3
+            continue
+        
+        # Get current values
+        status = r.hget(peer_key, "status")
+        traffic_str = r.hget(peer_key, "traffic") or "[]"
+        try:
+            traffic = json.loads(traffic_str)
+        except:
+            traffic = []
+        
+        total_sent = float(r.hget(peer_key, "total_sent") or 0)
+        total_receive = float(r.hget(peer_key, "total_receive") or 0)
+        
+        cur_total_sent = round(int(data_usage[count + 2]) / (1024 ** 3), 4)
+        cur_total_receive = round(int(data_usage[count + 1]) / (1024 ** 3), 4)
+        
+        if status == "running":
+            if total_sent <= cur_total_sent and total_receive <= cur_total_receive:
+                total_sent = cur_total_sent
+                total_receive = cur_total_receive
+            else:
+                now = datetime.now()
+                ctime = now.strftime("%d/%m/%Y %H:%M:%S")
+                traffic.append({
+                    "time": ctime,
+                    "total_receive": round(total_receive, 4),
+                    "total_sent": round(total_sent, 4),
+                    "total_data": round(total_receive + total_sent, 4)
+                })
+                total_sent = 0
+                total_receive = 0
+            
+            # Update Redis
+            r.hset(peer_key, "traffic", json.dumps(traffic))
+            r.hset(peer_key, "total_receive", round(total_receive, 4))
+            r.hset(peer_key, "total_sent", round(total_sent, 4))
+            r.hset(peer_key, "total_data", round(total_receive + total_sent, 4))
+        
+        count += 3
+
+# Get endpoint from all peers of a configuration
+def get_endpoint(config_name):
+    # Get endpoint
+    try:
+        data_usage = subprocess.check_output("wg show " + config_name + " endpoints", shell=True)
+    except Exception:
+        return "stopped"
+    
+    r = get_redis_client()
+    if not r:
+        return "redis not available"
+    
+    data_usage = data_usage.decode("UTF-8").split()
+    count = 0
+    
+    for i in range(int(len(data_usage) / 2)):
+        public_key = data_usage[count]
+        endpoint = data_usage[count + 1]
+        
+        # Update endpoint
+        peer_key = get_peer_key(config_name, public_key)
+        r.hset(peer_key, "endpoint", endpoint)
+        
+        count += 2
+
+# Get allowed ips from all peers of a configuration
+def get_allowed_ip(config_name, conf_peer_data):
+    # Get allowed ip
+    r = get_redis_client()
+    if not r:
+        return
+    
+    for peer in conf_peer_data["Peers"]:
+        if "PublicKey" in peer:
+            public_key = peer["PublicKey"]
+            allowed_ips = peer.get('AllowedIPs', '(None)')
+            
+            # Update allowed IP
+            peer_key = get_peer_key(config_name, public_key)
+            r.hset(peer_key, "allowed_ip", allowed_ips)
 
 """
 Helper Functions
@@ -315,7 +544,7 @@ def read_conf_file(config_name):
     return conf_peer_data
 
 # Get latest handshake from all peers of a configuration
-def get_latest_handshake(config_name, conn, cursor):
+def get_latest_handshake(config_name, db, peers):
     # Get latest handshakes
     try:
         data_usage = subprocess.check_output("wg show " + config_name + " latest-handshakes", shell=True)
@@ -332,20 +561,14 @@ def get_latest_handshake(config_name, conn, cursor):
         else:
             status = "stopped"
         if int(data_usage[count + 1]) > 0:
-            cursor.execute(
-                "UPDATE peers SET latest_handshake = ?, status = ? WHERE id = ?",
-                (str(minus).split(".")[0], status, data_usage[count])
-            )
+            db.update({"latest_handshake": str(minus).split(".")[0], "status": status},
+                      peers.id == data_usage[count])
         else:
-            cursor.execute(
-                "UPDATE peers SET latest_handshake = ?, status = ? WHERE id = ?",
-                ("(None)", status, data_usage[count])
-            )
+            db.update({"latest_handshake": "(None)", "status": status}, peers.id == data_usage[count])
         count += 2
-    conn.commit()
 
 # Get transfer from all peers of a configuration
-def get_transfer(config_name, conn, cursor):
+def get_transfer(config_name, db, peers):
     # Get transfer
     try:
         data_usage = subprocess.check_output("wg show " + config_name + " transfer", shell=True)
@@ -355,28 +578,17 @@ def get_transfer(config_name, conn, cursor):
     data_usage = data_usage.decode("UTF-8").split()
     count = 0
     for i in range(int(len(data_usage) / 3)):
-        cursor.execute("SELECT total_sent, total_receive, traffic, status FROM peers WHERE id = ?", (data_usage[count],))
-        cur_i = cursor.fetchone()
+        cur_i = db.search(peers.id == data_usage[count])
         
-        if not cur_i:
-            count += 3
-            continue
-            
-        # Lấy giá trị hoặc sử dụng giá trị mặc định
-        total_sent = cur_i[0] or 0
-        total_receive = cur_i[1] or 0
-        traffic_str = cur_i[2] or '[]'
-        status = cur_i[3]
-        
-        try:
-            traffic = json.loads(traffic_str)
-        except:
-            traffic = []
+        # Kiểm tra và khởi tạo giá trị mặc định
+        total_sent = cur_i[0].get('total_sent', 0)  # Sử dụng get để lấy giá trị hoặc 0 nếu không tồn tại
+        total_receive = cur_i[0].get('total_receive', 0)  # Tương tự cho total_receive
+        traffic = cur_i[0].get('traffic', [])  # Khởi tạo traffic là danh sách rỗng nếu không tồn tại
         
         cur_total_sent = round(int(data_usage[count + 2]) / (1024 ** 3), 4)
         cur_total_receive = round(int(data_usage[count + 1]) / (1024 ** 3), 4)
         
-        if status == "running":
+        if cur_i[0]["status"] == "running":
             if total_sent <= cur_total_sent and total_receive <= cur_total_receive:
                 total_sent = cur_total_sent
                 total_receive = cur_total_receive
@@ -392,22 +604,17 @@ def get_transfer(config_name, conn, cursor):
                 total_sent = 0
                 total_receive = 0
             
-            cursor.execute(
-                "UPDATE peers SET traffic = ?, total_receive = ?, total_sent = ?, total_data = ? WHERE id = ?",
-                (
-                    json.dumps(traffic),
-                    round(total_receive, 4),
-                    round(total_sent, 4),
-                    round(total_receive + total_sent, 4),
-                    data_usage[count]
-                )
-            )
+            db.update({
+                "traffic": traffic,
+                "total_receive": round(total_receive, 4),
+                "total_sent": round(total_sent, 4),
+                "total_data": round(total_receive + total_sent, 4)
+            }, peers.id == data_usage[count])
 
         count += 3
-    conn.commit()
 
 # Get endpoint from all peers of a configuration
-def get_endpoint(config_name, conn, cursor):
+def get_endpoint(config_name, db, peers):
     # Get endpoint
     try:
         data_usage = subprocess.check_output("wg show " + config_name + " endpoints", shell=True)
@@ -416,179 +623,161 @@ def get_endpoint(config_name, conn, cursor):
     data_usage = data_usage.decode("UTF-8").split()
     count = 0
     for i in range(int(len(data_usage) / 2)):
-        cursor.execute(
-            "UPDATE peers SET endpoint = ? WHERE id = ?",
-            (data_usage[count + 1], data_usage[count])
-        )
+        db.update({"endpoint": data_usage[count + 1]}, peers.id == data_usage[count])
         count += 2
-    conn.commit()
 
 # Get allowed ips from all peers of a configuration
-def get_allowed_ip(config_name, conn, cursor, conf_peer_data):
+def get_allowed_ip(config_name, db, peers, conf_peer_data):
     # Get allowed ip
     for i in conf_peer_data["Peers"]:
-        cursor.execute(
-            "UPDATE peers SET allowed_ip = ? WHERE id = ?",
-            (i.get('AllowedIPs', '(None)'), i["PublicKey"])
-        )
-    conn.commit()
+        db.update({"allowed_ip": i.get('AllowedIPs', '(None)')}, peers.id == i["PublicKey"])
 
 # Look for new peers from WireGuard
 def get_all_peers_data(config_name):
-    # Đảm bảo database đã được khởi tạo
-    init_db_for_config(config_name)
+    """Get and update peer data from WireGuard to Redis"""
+    # Get Redis connection
+    r = get_redis_client()
+    if not r:
+        print("Redis connection not available")
+        return
     
-    db_path = get_db_path(config_name)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = dict_factory
-    cursor = conn.cursor()
-    
+    # Read configuration files
     conf_peer_data = read_conf_file(config_name)
     config = get_dashboard_conf()
     
-    # Lấy danh sách peer hiện có trong database
-    cursor.execute("SELECT id FROM peers")
-    existing_peers = {row['id'] for row in cursor.fetchall()}
+    # Check if we should persist to disk
+    should_persist = should_update_db(config_name)
     
-    for i in conf_peer_data['Peers']:
-        # Kiểm tra peer có tồn tại chưa
-        cursor.execute("SELECT COUNT(*) FROM peers WHERE id = ?", (i['PublicKey'],))
-        if cursor.fetchone()[0] == 0:
-            # Thêm peer mới
-            cursor.execute("""
-                INSERT INTO peers (
-                    id, private_key, DNS, endpoint_allowed_ip, name, 
-                    total_receive, total_sent, total_data, endpoint, 
-                    status, latest_handshake, allowed_ip, traffic, 
-                    mtu, keepalive, remote_endpoint
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                i['PublicKey'], "", config.get("Peers", "peer_global_DNS"),
-                config.get("Peers", "peer_endpoint_allowed_ip"), "", 
-                0, 0, 0, "N/A", "stopped", "N/A", "N/A", "[]",
-                config.get("Peers", "peer_mtu"), 
-                config.get("Peers", "peer_keep_alive"),
-                config.get("Peers", "remote_endpoint")
-            ))
-        else:
-            # Cập nhật peer nếu cần
-            cursor.execute("""
-                SELECT DNS, endpoint_allowed_ip, private_key, mtu, keepalive, remote_endpoint 
-                FROM peers WHERE id = ?
-            """, (i['PublicKey'],))
-            row = cursor.fetchone()
+    # Track existing peers for cleanup
+    existing_peer_ids = set()
+    
+    # Process peers from configuration
+    for peer in conf_peer_data['Peers']:
+        if "PublicKey" not in peer:
+            continue
+        
+        peer_id = peer['PublicKey']
+        existing_peer_ids.add(peer_id)
+        
+        # Check if peer exists in Redis
+        peer_key = get_peer_key(config_name, peer_id)
+        if not r.exists(peer_key):
+            # Add new peer
+            new_peer = {
+                "id": peer_id,
+                "private_key": "",
+                "DNS": config.get("Peers", "peer_global_DNS"),
+                "endpoint_allowed_ip": config.get("Peers", "peer_endpoint_allowed_ip"),
+                "name": "",
+                "total_receive": 0,
+                "total_sent": 0,
+                "total_data": 0,
+                "endpoint": "N/A",
+                "status": "stopped",
+                "latest_handshake": "N/A",
+                "allowed_ip": "N/A",
+                "traffic": "[]",
+                "mtu": config.get("Peers", "peer_mtu"),
+                "keepalive": config.get("Peers", "peer_keep_alive"),
+                "remote_endpoint": config.get("Peers", "remote_endpoint")
+            }
             
-            # Cập nhật thiếu các thiết lập mặc định
-            update_fields = {}
-            if not row['DNS']:  # DNS
-                update_fields['DNS'] = config.get("Peers", "peer_global_DNS")
-            if not row['endpoint_allowed_ip']:  # endpoint_allowed_ip
-                update_fields['endpoint_allowed_ip'] = config.get("Peers", "peer_endpoint_allowed_ip")
-            if not row['private_key']:  # private_key
-                update_fields['private_key'] = ''
-            if not row['mtu']:  # mtu
-                update_fields['mtu'] = config.get("Peers", "peer_mtu")
-            if not row['keepalive']:  # keepalive
-                update_fields['keepalive'] = config.get("Peers", "peer_keep_alive")
-            if not row['remote_endpoint']:  # remote_endpoint
-                update_fields['remote_endpoint'] = config.get("Peers", "remote_endpoint")
-                
-            # Cập nhật nếu có thiếu thông tin
-            if update_fields:
-                set_clause = ", ".join([f"{key} = ?" for key in update_fields.keys()])
-                values = list(update_fields.values()) + [i['PublicKey']]
-                cursor.execute(f"UPDATE peers SET {set_clause} WHERE id = ?", values)
+            # Save to Redis
+            r.hset(peer_key, mapping=new_peer)
+            r.sadd(get_peers_set_key(config_name), peer_id)
+        else:
+            # Update peer settings if needed
+            fields_to_check = {
+                "DNS": config.get("Peers", "peer_global_DNS"),
+                "endpoint_allowed_ip": config.get("Peers", "peer_endpoint_allowed_ip"),
+                "private_key": "",
+                "mtu": config.get("Peers", "peer_mtu"),
+                "keepalive": config.get("Peers", "peer_keep_alive"),
+                "remote_endpoint": config.get("Peers", "remote_endpoint")
+            }
+            
+            # Check each field and update if missing
+            for field, default_value in fields_to_check.items():
+                if not r.hexists(peer_key, field):
+                    r.hset(peer_key, field, default_value)
     
-    # Lấy danh sách peer từ WireGuard
-    wg_keys = {peer['PublicKey'] for peer in conf_peer_data['Peers']}
+    # Remove peers that no longer exist in WireGuard
+    peers_key = get_peers_set_key(config_name)
+    all_peer_ids = r.smembers(peers_key)
     
-    # Xóa peer không còn tồn tại trong WireGuard
-    for db_key in existing_peers:
-        if db_key not in wg_keys:
-            cursor.execute("DELETE FROM peers WHERE id = ?", (db_key,))
+    for peer_id in all_peer_ids:
+        if peer_id not in existing_peer_ids:
+            # Delete peer data
+            delete_peer_from_redis(config_name, peer_id)
     
-    # Đồng bộ thông tin
+    # Update real-time data
     tic = time.perf_counter()
-    get_latest_handshake(config_name, conn, cursor)
-    get_transfer(config_name, conn, cursor)
-    get_endpoint(config_name, conn, cursor)
-    get_allowed_ip(config_name, conn, cursor, conf_peer_data)
+    get_latest_handshake(config_name)
+    get_transfer(config_name)
+    get_endpoint(config_name)
+    get_allowed_ip(config_name, conf_peer_data)
     toc = time.perf_counter()
     print(f"Finish fetching data in {toc - tic:0.4f} seconds")
     
-    conn.commit()
-    conn.close()
+    # Ensure data is persisted if needed
+    if should_persist:
+        print(f"Persisting Redis data for {config_name}")
+        r.save()
 
-"""
-Frontend Related Functions
-"""
 # Search for peers
 def get_peers(config_name, search, sort_t):
+    """Get filtered and sorted peers from Redis"""
     get_all_peers_data(config_name)
-    db_path = get_db_path(config_name)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = dict_factory
-    cursor = conn.cursor()
     
-    if len(search) == 0:
-        cursor.execute("SELECT * FROM peers")
-    else:
-        cursor.execute("SELECT * FROM peers WHERE name LIKE ?", (f'%{search}%',))
-        
-    result = cursor.fetchall()
+    r = get_redis_client()
+    if not r:
+        return []
     
-    # Chuyển đổi traffic từ JSON string thành list
-    for row in result:
-        if 'traffic' in row and row['traffic']:
-            try:
-                row['traffic'] = json.loads(row['traffic'])
-            except:
-                row['traffic'] = []
+    # Get all peers
+    peers = get_all_peers_from_redis(config_name)
     
-    # Sắp xếp kết quả
-    if sort_t in result[0] if result else []:
-        result = sorted(result, key=lambda d: d[sort_t])
+    # Filter by search term if provided
+    if search and len(search) > 0:
+        search = search.lower()
+        peers = [p for p in peers if search in p.get('name', '').lower()]
     
-    conn.close()
-    return result
-
-
-
+    # Sort peers
+    if sort_t:
+        peers = sorted(peers, key=lambda d: d.get(sort_t, ''))
+    
+    return peers
 
 # Get configuration total data
 def get_conf_total_data(config_name):
-    db_path = get_db_path(config_name)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = dict_factory
-    cursor = conn.cursor()
+    """Get total data usage for a configuration from Redis"""
+    r = get_redis_client()
+    if not r:
+        return [0, 0, 0]
     
     upload_total = 0
     download_total = 0
     
-    # Lấy tổng dữ liệu hiện tại
-    cursor.execute("SELECT total_sent, total_receive, traffic FROM peers")
-    peers = cursor.fetchall()
+    # Get all peers for this config
+    peers = get_all_peers_from_redis(config_name)
     
     for peer in peers:
-        upload_total += peer['total_sent'] or 0
-        download_total += peer['total_receive'] or 0
+        upload_total += float(peer.get('total_sent', 0))
+        download_total += float(peer.get('total_receive', 0))
         
-        if peer['traffic']:
-            try:
-                traffic = json.loads(peer['traffic'])
-                for k in traffic:
-                    upload_total += k['total_sent']
-                    download_total += k['total_receive']
-            except:
-                pass
+        # Add traffic from history
+        for traffic_entry in peer.get('traffic', []):
+            upload_total += float(traffic_entry.get('total_sent', 0))
+            download_total += float(traffic_entry.get('total_receive', 0))
     
     total = round(upload_total + download_total, 4)
     upload_total = round(upload_total, 4)
     download_total = round(download_total, 4)
     
-    conn.close()
     return [total, upload_total, download_total]
 
+"""
+Frontend Related Functions
+"""
 # Get configuration public key
 def get_conf_pub_key(config_name):
     conf = configparser.ConfigParser(strict=False)
@@ -673,39 +862,32 @@ def checkKeyMatch(private_key, public_key, config_name):
     if result['status'] == 'failed':
         return result
     else:
-        db_path = get_db_path(config_name)
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT COUNT(*) FROM peers WHERE id = ?", (public_key,))
-        match_count = cursor.fetchone()[0]
-        
-        conn.close()
-        
-        if match_count != 1 or result['data'] != public_key:
+        db = TinyDB('db/' + config_name + '.json')
+        peers = Query()
+        match = db.search(peers.id == result['data'])
+        if len(match) != 1 or result['data'] != public_key:
             return {'status': 'failed', 'msg': 'Please check your private key, it does not match with the public key.'}
         else:
             return {'status': 'success'}
 
 # Check if there is repeated allowed IP
 def check_repeat_allowed_IP(public_key, ip, config_name):
-    db_path = get_db_path(config_name)
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
+    """Check if an allowed IP is already in use by another peer"""
+    r = get_redis_client()
+    if not r:
+        return {'status': 'failed', 'msg': 'Redis connection not available'}
     
-    # Kiểm tra peer tồn tại
-    cursor.execute("SELECT COUNT(*) FROM peers WHERE id = ?", (public_key,))
-    if cursor.fetchone()[0] != 1:
-        conn.close()
+    # Check if the peer exists
+    peer_key = get_peer_key(config_name, public_key)
+    if not r.exists(peer_key):
         return {'status': 'failed', 'msg': 'Peer does not exist'}
     
-    # Kiểm tra IP đã tồn tại
-    cursor.execute("SELECT COUNT(*) FROM peers WHERE id != ? AND allowed_ip = ?", (public_key, ip))
-    if cursor.fetchone()[0] > 0:
-        conn.close()
-        return {'status': 'failed', 'msg': "Allowed IP already taken by another peer."}
+    # Get all peers and check for IP conflict
+    peers = get_all_peers_from_redis(config_name)
+    for peer in peers:
+        if peer.get('id') != public_key and peer.get('allowed_ip') == ip:
+            return {'status': 'failed', 'msg': "Allowed IP already taken by another peer."}
     
-    conn.close()
     return {'status': 'success'}
 
 
@@ -1062,115 +1244,130 @@ def switch(config_name):
 # Add peer
 @app.route('/add_peer/<config_name>', methods=['POST'])
 def add_peer(config_name):
-    db_path = get_db_path(config_name)
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
+    """Add a new peer to WireGuard and Redis"""
+    if get_conf_status(config_name) == "stopped":
+        return "Your need to turn on " + config_name + " first."
     
     data = request.get_json()
-    public_key = data['public_key']
-    allowed_ips = data['allowed_ips']
-    endpoint_allowed_ip = data['endpoint_allowed_ip']
+    name = data['name']
     DNS = data['DNS']
-    keys = get_conf_peer_key(config_name)
+    allowed_ip = data['allowed_ip']
+    endpoint_allowed_ip = data['endpoint_allowed_ip']
     
-    if len(public_key) == 0 or len(DNS) == 0 or len(allowed_ips) == 0 or len(endpoint_allowed_ip) == 0:
-        conn.close()
-        return "Please fill in all required box."
-        
-    if type(keys) != list:
-        conn.close()
-        return config_name + " is not running."
-        
-    if public_key in keys:
-        conn.close()
-        return "Public key already exist."
+    # Validate data
+    if not check_IP(allowed_ip):
+        return "Allowed IP format is incorrect."
     
-    # Kiểm tra allowed IP đã tồn tại chưa
-    cursor.execute("SELECT COUNT(*) FROM peers WHERE allowed_ip = ?", (allowed_ips,))
-    if cursor.fetchone()[0] > 0:
-        conn.close()
-        return "Allowed IP already taken by another peer."
+    if not check_IP_with_range(endpoint_allowed_ip):
+        return "Endpoint Allowed IPs format is incorrect."
     
     if not check_DNS(DNS):
-        conn.close()
-        return "DNS formate is incorrect. Example: 1.1.1.1"
-        
-    if not check_Allowed_IPs(endpoint_allowed_ip):
-        conn.close()
-        return "Endpoint Allowed IPs format is incorrect."
-        
+        return "DNS format is incorrect."
+    
     if len(data['MTU']) != 0:
         try:
             mtu = int(data['MTU'])
         except:
-            conn.close()
             return "MTU format is not correct."
-            
+    
     if len(data['keep_alive']) != 0:
         try:
             keep_alive = int(data['keep_alive'])
         except:
-            conn.close()
             return "Persistent Keepalive format is not correct."
     
+    # Check IP availability
+    r = get_redis_client()
+    if not r:
+        return "Redis connection not available"
+    
+    # Check for IP conflicts
+    peers = get_all_peers_from_redis(config_name)
+    for peer in peers:
+        if peer.get('allowed_ip') == allowed_ip:
+            return "Allowed IP already taken by another peer."
+    
+    # Get server details
+    pub_conf_key = get_conf_pub_key(config_name)
+    
+    # Create new keys
+    private_key = subprocess.check_output('wg genkey', shell=True).decode('utf-8').strip()
+    public_key = subprocess.check_output(f'echo "{private_key}" | wg pubkey', shell=True).decode('utf-8').strip()
+    
     try:
-        status = subprocess.check_output(
-            "wg set " + config_name + " peer " + public_key + " allowed-ips " + allowed_ips, shell=True,
-            stderr=subprocess.STDOUT)
-        status = subprocess.check_output("wg-quick save " + config_name, shell=True, stderr=subprocess.STDOUT)
-        get_all_peers_data(config_name)
+        # Add to WireGuard
+        status = subprocess.check_output(f'wg set {config_name} peer {public_key} allowed-ips {allowed_ip}',
+                                        shell=True, stderr=subprocess.STDOUT)
+        save_status = subprocess.check_output(f'wg-quick save {config_name}', shell=True, stderr=subprocess.STDOUT)
         
-        # Update peer trong database
-        cursor.execute("""
-            UPDATE peers SET name = ?, private_key = ?, DNS = ?, endpoint_allowed_ip = ? 
-            WHERE id = ?
-        """, (data['name'], data['private_key'], data['DNS'], endpoint_allowed_ip, public_key))
+        # Save to Redis
+        peer_data = {
+            "name": name,
+            "private_key": private_key,
+            "allowed_ip": allowed_ip,
+            "DNS": DNS,
+            "endpoint_allowed_ip": endpoint_allowed_ip,
+            "mtu": data['MTU'],
+            "keepalive": data['keep_alive'],
+            "created_at": datetime.now().isoformat()
+        }
         
-        conn.commit()
-        conn.close()
-        return "true"
+        save_peer_to_redis(config_name, public_key, peer_data)
+        
+        # Force persistence
+        r.save()
+        
+        # Return new peer info
+        return jsonify({
+            "status": "success",
+            "peer_id": public_key,
+            "private_key": private_key
+        })
     except subprocess.CalledProcessError as exc:
-        conn.close()
-        return exc.output.strip()
+        return exc.output.decode("UTF-8").strip()
 
 # Remove peer
 @app.route('/remove_peer/<config_name>', methods=['POST'])
 def remove_peer(config_name):
+    """Remove a peer from WireGuard and Redis"""
     if get_conf_status(config_name) == "stopped":
         return "Your need to turn on " + config_name + " first."
-        
-    db_path = get_db_path(config_name)
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
     
     data = request.get_json()
     delete_key = data['peer_id']
     keys = get_conf_peer_key(config_name)
     
     if type(keys) != list:
-        conn.close()
         return config_name + " is not running."
-        
+    
     if delete_key not in keys:
-        conn.close()
         return "This key does not exist"
-    else:
-        try:
-            status = subprocess.check_output("wg set " + config_name + " peer " + delete_key + " remove", shell=True,
-                                             stderr=subprocess.STDOUT)
-            status = subprocess.check_output("wg-quick save " + config_name, shell=True, stderr=subprocess.STDOUT)
-            
-            cursor.execute("DELETE FROM peers WHERE id = ?", (delete_key,))
-            conn.commit()
-            conn.close()
-            return "true"
-        except subprocess.CalledProcessError as exc:
-            conn.close()
-            return exc.output.strip()
+    
+    # Get Redis connection
+    r = get_redis_client()
+    if not r:
+        return "Redis connection not available"
+    
+    try:
+        # Remove from WireGuard
+        status = subprocess.check_output("wg set " + config_name + " peer " + delete_key + " remove", shell=True,
+                                        stderr=subprocess.STDOUT)
+        status = subprocess.check_output("wg-quick save " + config_name, shell=True, stderr=subprocess.STDOUT)
+        
+        # Remove from Redis
+        delete_peer_from_redis(config_name, delete_key)
+        
+        # Force persistence
+        r.save()
+        
+        return "true"
+    except subprocess.CalledProcessError as exc:
+        return exc.output.strip()
 
 # Save peer settings
 @app.route('/save_peer_setting/<config_name>', methods=['POST'])
 def save_peer_setting(config_name):
+    """Save peer settings to Redis"""
     data = request.get_json()
     id = data['id']
     name = data['name']
@@ -1179,96 +1376,103 @@ def save_peer_setting(config_name):
     allowed_ip = data['allowed_ip']
     endpoint_allowed_ip = data['endpoint_allowed_ip']
     
-    db_path = get_db_path(config_name)
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
+    # Get Redis connection
+    r = get_redis_client()
+    if not r:
+        return jsonify({"status": "failed", "msg": "Redis connection not available"})
     
-    # Kiểm tra peer tồn tại
-    cursor.execute("SELECT COUNT(*) FROM peers WHERE id = ?", (id,))
-    if cursor.fetchone()[0] == 1:
-        check_ip = check_repeat_allowed_IP(id, allowed_ip, config_name)
-        
-        if not check_IP_with_range(endpoint_allowed_ip):
-            conn.close()
-            return jsonify({"status": "failed", "msg": "Endpoint Allowed IPs format is incorrect."})
-            
-        if not check_DNS(DNS):
-            conn.close()
-            return jsonify({"status": "failed", "msg": "DNS format is incorrect."})
-            
-        if len(data['MTU']) != 0:
-            try:
-                mtu = int(data['MTU'])
-            except:
-                conn.close()
-                return jsonify({"status": "failed", "msg": "MTU format is not correct."})
-                
-        if len(data['keep_alive']) != 0:
-            try:
-                keep_alive = int(data['keep_alive'])
-            except:
-                conn.close()
-                return jsonify({"status": "failed", "msg": "Persistent Keepalive format is not correct."})
-                
-        if private_key != "":
-            check_key = checkKeyMatch(private_key, id, config_name)
-            if check_key['status'] == "failed":
-                conn.close()
-                return jsonify(check_key)
-                
-        if check_ip['status'] == "failed":
-            conn.close()
-            return jsonify(check_ip)
-            
-        try:
-            if allowed_ip == "": allowed_ip = '""'
-            change_ip = subprocess.check_output('wg set ' + config_name + " peer " + id + " allowed-ips " + allowed_ip,
-                                                shell=True, stderr=subprocess.STDOUT)
-            save_change_ip = subprocess.check_output('wg-quick save ' + config_name, shell=True,
-                                                     stderr=subprocess.STDOUT)
-                                                     
-            if change_ip.decode("UTF-8") != "":
-                conn.close()
-                return jsonify({"status": "failed", "msg": change_ip.decode("UTF-8")})
-                
-            cursor.execute("""
-                UPDATE peers SET name = ?, private_key = ?, DNS = ?, endpoint_allowed_ip = ?, mtu = ?, keepalive = ?
-                WHERE id = ?
-            """, (name, private_key, DNS, endpoint_allowed_ip, data['MTU'], data['keep_alive'], id))
-            
-            conn.commit()
-            conn.close()
-            return jsonify({"status": "success", "msg": ""})
-        except subprocess.CalledProcessError as exc:
-            conn.close()
-            return jsonify({"status": "failed", "msg": str(exc.output.decode("UTF-8").strip())})
-    else:
-        conn.close()
+    # Check if peer exists
+    peer_key = get_peer_key(config_name, id)
+    if not r.exists(peer_key):
         return jsonify({"status": "failed", "msg": "This peer does not exist."})
+    
+    # Validate data
+    if not check_IP_with_range(endpoint_allowed_ip):
+        return jsonify({"status": "failed", "msg": "Endpoint Allowed IPs format is incorrect."})
+    
+    if not check_DNS(DNS):
+        return jsonify({"status": "failed", "msg": "DNS format is incorrect."})
+    
+    if len(data['MTU']) != 0:
+        try:
+            mtu = int(data['MTU'])
+        except:
+            return jsonify({"status": "failed", "msg": "MTU format is not correct."})
+    
+    if len(data['keep_alive']) != 0:
+        try:
+            keep_alive = int(data['keep_alive'])
+        except:
+            return jsonify({"status": "failed", "msg": "Persistent Keepalive format is not correct."})
+    
+    if private_key != "":
+        check_key = checkKeyMatch(private_key, id, config_name)
+        if check_key['status'] == "failed":
+            return jsonify(check_key)
+    
+    # Check for IP conflicts
+    check_ip = check_repeat_allowed_IP(id, allowed_ip, config_name)
+    if check_ip['status'] == "failed":
+        return jsonify(check_ip)
+    
+    try:
+        if allowed_ip == "": allowed_ip = '""'
+        change_ip = subprocess.check_output(f'wg set {config_name} peer {id} allowed-ips {allowed_ip}',
+                                            shell=True, stderr=subprocess.STDOUT)
+        save_change_ip = subprocess.check_output(f'wg-quick save {config_name}', shell=True,
+                                                stderr=subprocess.STDOUT)
+        if change_ip.decode("UTF-8") != "":
+            return jsonify({"status": "failed", "msg": change_ip.decode("UTF-8")})
+        
+        # Update Redis
+        update_data = {
+            "name": name,
+            "private_key": private_key,
+            "DNS": DNS,
+            "endpoint_allowed_ip": endpoint_allowed_ip,
+            "mtu": data['MTU'],
+            "keepalive": data['keep_alive']
+        }
+        
+        r.hset(peer_key, mapping=update_data)
+        
+        # Force persistence
+        r.save()
+        
+        return jsonify({"status": "success", "msg": ""})
+    except subprocess.CalledProcessError as exc:
+        return jsonify({"status": "failed", "msg": str(exc.output.decode("UTF-8").strip())})
 
 # Get peer settings
 @app.route('/get_peer_data/<config_name>', methods=['POST'])
 def get_peer_name(config_name):
+    """Get peer data from Redis"""
     data = request.get_json()
     id = data['id']
     
-    db_path = get_db_path(config_name)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = dict_factory
-    cursor = conn.cursor()
+    # Get Redis connection
+    r = get_redis_client()
+    if not r:
+        return jsonify({"status": "failed", "msg": "Redis connection not available"})
     
-    cursor.execute("""
-        SELECT name, allowed_ip, DNS, private_key, endpoint_allowed_ip, mtu, keepalive 
-        FROM peers WHERE id = ?
-    """, (id,))
-    result = cursor.fetchone()
+    # Get peer data
+    peer_data = get_peer_from_redis(config_name, id)
     
-    conn.close()
+    if not peer_data:
+        return jsonify({"status": "failed", "msg": "Peer not found"})
     
-    if result:
-        return jsonify(result)
-    else:
-        return jsonify({})
+    # Return formatted data
+    result = {
+        "name": peer_data.get('name', ''),
+        "allowed_ip": peer_data.get('allowed_ip', ''),
+        "DNS": peer_data.get('DNS', ''),
+        "private_key": peer_data.get('private_key', ''),
+        "endpoint_allowed_ip": peer_data.get('endpoint_allowed_ip', ''),
+        "mtu": peer_data.get('mtu', ''),
+        "keep_alive": peer_data.get('keepalive', '')
+    }
+    
+    return jsonify(result)
 
 # Generate a private key
 @app.route('/generate_peer', methods=['GET'])
@@ -1293,52 +1497,59 @@ def check_key_match(config_name):
 # Download configuration file
 @app.route('/download/<config_name>', methods=['GET'])
 def download(config_name):
-    print(request.headers.get('User-Agent'))
+    """Generate and download a peer configuration file"""
     id = request.args.get('id')
-    db = sqlite3.connect(get_db_path(config_name))
-    cursor = db.cursor()
-    get_peer = cursor.execute("SELECT * FROM peers WHERE id = ?", (id,)).fetchone()
-    config = get_dashboard_conf()
-    if len(get_peer) == 1:
-        peer = get_peer
-        if peer['private_key'] != "":
-            public_key = get_conf_pub_key(config_name)
-            listen_port = get_conf_listen_port(config_name)
-            endpoint = config.get("Peers","remote_endpoint") + ":" + listen_port
-            private_key = peer['private_key']
-            allowed_ip = peer['allowed_ip']
-            DNS = peer['DNS']
-            endpoint_allowed_ip = peer['endpoint_allowed_ip']
-            filename = peer['name']
-            if len(filename) == 0:
-                filename = "Untitled_Peers"
-            else:
-                filename = peer['name']
-                # Clean filename
-                illegal_filename = [".", ",", "/", "?", "<", ">", "\\", ":", "*", '|' '\"', "com1", "com2", "com3",
-                                    "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4",
-                                    "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "con", "nul", "prn"]
-                for i in illegal_filename:
-                    filename = filename.replace(i, "")
-                if len(filename) == 0:
-                    filename = "Untitled_Peer"
-                filename = "".join(filename.split(' '))
-            filename = filename + "_" + config_name
-
-            def generate(private_key, allowed_ip, DNS, public_key, endpoint):
-                yield "[Interface]\nPrivateKey = " + private_key + "\nAddress = " + allowed_ip + "\nDNS = " + DNS + "\n\n[Peer]\nPublicKey = " + public_key + "\nAllowedIPs = "+endpoint_allowed_ip+"\nEndpoint = " + endpoint
-
-            return app.response_class(generate(private_key, allowed_ip, DNS, public_key, endpoint),
-                                      mimetype='text/conf',
-                                      headers={"Content-Disposition": "attachment;filename=" + filename + ".conf"})
-    else:
+    
+    # Get Redis connection
+    r = get_redis_client()
+    if not r:
         return redirect("/configuration/" + config_name)
+    
+    # Get peer data
+    peer_data = get_peer_from_redis(config_name, id)
+    
+    if not peer_data or 'private_key' not in peer_data or not peer_data['private_key']:
+        return redirect("/configuration/" + config_name)
+    
+    config = get_dashboard_conf()
+    public_key = get_conf_pub_key(config_name)
+    listen_port = get_conf_listen_port(config_name)
+    endpoint = config.get("Peers", "remote_endpoint") + ":" + listen_port
+    
+    private_key = peer_data['private_key']
+    allowed_ip = peer_data['allowed_ip']
+    DNS = peer_data['DNS']
+    endpoint_allowed_ip = peer_data['endpoint_allowed_ip']
+    filename = peer_data['name']
+    
+    # Generate filename
+    if len(filename) == 0:
+        filename = "Untitled_Peers"
+    else:
+        # Clean filename
+        illegal_filename = [".", ",", "/", "?", "<", ">", "\\", ":", "*", '|' '\"', "com1", "com2", "com3",
+                            "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4",
+                        "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "con", "nul", "prn"]
+        for i in illegal_filename:
+            filename = filename.replace(i, "")
+        if len(filename) == 0:
+            filename = "Untitled_Peer"
+        filename = "".join(filename.split(' '))
+    
+    filename = filename + "_" + config_name
+    
+    # Generate config
+    def generate(private_key, allowed_ip, DNS, public_key, endpoint):
+        yield "[Interface]\nPrivateKey = " + private_key + "\nAddress = " + allowed_ip + "\nDNS = " + DNS + "\n\n[Peer]\nPublicKey = " + public_key + "\nAllowedIPs = "+endpoint_allowed_ip+"\nEndpoint = " + endpoint
+    
+    return app.response_class(generate(private_key, allowed_ip, DNS, public_key, endpoint),
+                            mimetype='text/conf',
+                            headers={"Content-Disposition": "attachment;filename=" + filename + ".conf"})
 
 # Switch peer displate mode
 @app.route('/switch_display_mode/<mode>', methods=['GET'])
 def switch_display_mode(mode):
     if mode in ['list','grid']:
-        config = configparser.ConfigParser(strict=False)
         config.read(dashboard_conf)
         config.set("Peers", "peer_display_mode", mode)
         config.write(open(dashboard_conf, "w"))
@@ -1354,9 +1565,9 @@ Dashboard Tools Related
 @app.route('/get_ping_ip', methods=['POST'])
 def get_ping_ip():
     config = request.form['config']
-    db = sqlite3.connect(get_db_path(config))
+    db = TinyDB('db/' + config + '.json')
     html = ""
-    for i in db.execute("SELECT * FROM peers").fetchall():
+    for i in db.all():
         html += '<optgroup label="' + i['name'] + ' - ' + i['id'] + '">'
         allowed_ip = str(i['allowed_ip']).split(",")
         for k in allowed_ip:
@@ -1412,247 +1623,130 @@ def traceroute_ip():
 
 @app.route('/create_client/<config_name>', methods=['POST'])
 def create_client(config_name):
-    """Tạo máy khách mới và trả về tập tin cấu hình."""
-    # Khởi tạo database cho cấu hình trước
-    init_db_for_config(config_name)
+    cleanup_inactive_peers()
+    db = TinyDB(f"db/{config_name}.json")
+    peers = Query()
+    data = request.get_json()
     
-    # Xóa các máy khách không hoạt động
-    cleanup_inactive_peers(config_name)
-
-    # Lấy dữ liệu từ form
-    data = request.form.to_dict()
-    if "dns" not in data:
-        data["dns"] = get_default_dns()
-
-    if "name" not in data or data["name"] == "":
-        data["name"] = generate_random_name()
-
-    # Kết nối đến database
-    db_path = get_db_path(config_name)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = dict_factory
-    cursor = conn.cursor()
-
-    try:
-        # Kiểm tra lại bảng có tồn tại không
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='peers'")
-        if not cursor.fetchone():
-            print(f"Table 'peers' still doesn't exist, creating it now in create_client")
-            conn.close()
-            init_db_for_config(config_name)
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = dict_factory
-            cursor = conn.cursor()
-
-        # Kiểm tra xem tên đã tồn tại chưa
-        cursor.execute("SELECT * FROM peers WHERE name = ?", (data["name"],))
-        if cursor.fetchone():
-            return jsonify({"error": "Client name already exists."})
-
-        # Tạo khóa mới nếu cần
-        if "private_key" in data and "id" in data and data["private_key"] != "" and data["id"] != "":
-            if not check_key_match(data["private_key"], data["id"]):
-                return jsonify({"error": "Private key doesn't match with Public key."})
-        else:
-            private_key = subprocess.check_output(["wg", "genkey"], text=True).strip()
-            public_key = subprocess.check_output(["wg", "pubkey"], text=True, input=private_key).strip()
-            data["private_key"] = private_key
-            data["id"] = public_key
-
-        # Kiểm tra xem public key đã có chưa
-        cursor.execute("SELECT * FROM peers WHERE id = ?", (data["id"],))
-        if cursor.fetchone():
-            return jsonify({"error": "Public key (id) already exists."})
-
-        # Xác định IP được phép
-        if "allowed_ips" not in data or data["allowed_ips"] == "":
-            # Lấy danh sách IP đã dùng
-            cursor.execute("SELECT allowed_ips FROM peers")
-            used_ips = []
-            for peer_data in cursor.fetchall():
-                if peer_data.get("allowed_ips"):
-                    used_ips.extend(peer_data["allowed_ips"].split(","))
-
-            # Loại bỏ subnet mask và tạo IPs từ mạng được cấu hình
-            server_settings = get_server_config(config_name)
-            network = '.'.join(server_settings["Address"].split('.')[:-1])
+    keys = get_conf_peer_key(config_name)
+    private_key=""
+    public_key=""
+    checkExist=False
+    config_content=""
+    for peer in db.all():
+        print("peer:",peer)
+        print("peer[name]:",peer["name"],",data[name]:",data["name"])
+        if(peer["name"]==data["name"]):
             
-            # Tìm IP khả dụng tiếp theo
-            for i in range(2, 255):
-                candidate_ip = f"{network}.{i}/32"
-                if candidate_ip not in used_ips:
-                    data["allowed_ips"] = candidate_ip
-                    break
-            else:
-                return jsonify({"error": "No available IPs in range."})
+            config_content = f"""# {peer['name']}
+            [Interface]
+            PrivateKey = {peer['private_key']}
+            Address = {peer['allowed_ip']}
+            DNS = {DEFAULT_DNS}
 
-        # Thêm peer vào database
-        now = int(time.time())
-        data.setdefault("traffic", json.dumps([0, 0]))
-        data.setdefault("name", generate_random_name())
-        data.setdefault("created", now)
-        data.setdefault("endpoint", "")
-        data.setdefault("latest_handshake", 0)
+            [Peer]
+            PublicKey = {peer['public_key']}
+            Endpoint ={peer['endpoint_allowed_ip']}
+            AllowedIPs = 0.0.0.0/0
+            PersistentKeepalive = {data.get('keep_alive', 21)}
+            """
+            checkExist=True
+            break
+    if not checkExist:
+        check = False
+        while not check:
+            key = gen_private_key()
+            private_key = key["private_key"]
+            public_key = key["public_key"]
+            if len(public_key) != 0 and public_key not in keys:
+                check = True
         
-        # Chuẩn bị câu lệnh SQL INSERT
-        fields = ", ".join(data.keys())
-        placeholders = ", ".join(["?"] * len(data))
-        
-        cursor.execute(
-            f"INSERT INTO peers ({fields}) VALUES ({placeholders})",
-            tuple(data.values())
-        )
-        conn.commit()
 
-        # Lấy thông tin server
-        server_settings = get_server_config(config_name)
-        server_public_key = get_server_pubkey(config_name)
+    # 2. Tạo allowed_ips dạng 10.66.66.xx/32
+    
+        existing_ips = [
+        int(peer['allowed_ip'].split('.')[3].split('/')[0])
+        for peer in db.all()
+        if 'allowed_ip' in peer and peer['allowed_ip'].startswith(BASE_IP)
+        ]
         
-        # Thêm peer vào WireGuard
-        subprocess.check_call([
-            "wg", "set", config_name,
-            "peer", data["id"],
-            "allowed-ips", data["allowed_ips"]
-        ])
-        
-        # Lưu cấu hình WireGuard
-        subprocess.check_call(["wg-quick", "save", config_name])
+        next_ip=2
+        for ip in range(2,255,1):
+            if ip not in existing_ips:
+                next_ip =ip
+                break
+        allowed_ips = f"{BASE_IP}.{next_ip}/32"
+        print("--------------------------------")
+        print("existing_ips:",existing_ips)
+        print("ip allowed_ip:",allowed_ips)
+        print("------------------------------")
 
-        # Tạo cấu hình client
-        config = f"""[Interface]
-PrivateKey = {data['private_key']}
-Address = {data['allowed_ips'].split('/')[0]}/24
-DNS = {data['dns']}
+        # 3. Kiểm tra IP trùng
+        if db.search(peers.allowed_ips == allowed_ips):
+            return jsonify({"error": "IP đã tồn tại"}), 409
+        try:
+            status = subprocess.check_output(
+                "wg set " + config_name + " peer " + public_key + " allowed-ips " + allowed_ips, shell=True,
+                stderr=subprocess.STDOUT)
+            status = subprocess.check_output("wg-quick save " + config_name, shell=True, stderr=subprocess.STDOUT)
+            get_all_peers_data(config_name)
 
-[Peer]
-PublicKey = {server_public_key}
-AllowedIPs = {server_settings.get('AllowedIPs', '0.0.0.0/0')}
-Endpoint = {server_settings['Endpoint']}
-"""
+        except subprocess.CalledProcessError as exc:
+            return exc.output.strip()
         
-        # Trả về tệp tin cấu hình
-        response = Response(
-            config,
-            mimetype="text/plain",
-            headers={"Content-disposition": f"attachment; filename={data['name']}.conf"}
-        )
-        return response
+        public_key_ip = public_key
+        public_key = get_conf_pub_key(config_name)
+        listen_port = get_conf_listen_port(config_name)
+        config = get_dashboard_conf()
+        endpoint = config.get("Peers","remote_endpoint") + ":" + listen_port
+        try:
+            db.update({"name": data['name'], "private_key": private_key, "DNS": DEFAULT_DNS,"public_key":public_key,
+            "endpoint_allowed_ip": endpoint,"allowed-ips":allowed_ips},
+            peers.id == public_key_ip)
+            db.close()
+        except subprocess.CalledProcessError as exc:
+            db.close()
+        filename = data["name"]
+        if len(filename) == 0:
+            filename = "Untitled_Peers"
+        else:
+            filename = data["name"]
+                    # Clean filename
+            illegal_filename = [".", ",", "/", "?", "<", ">", "\\", ":", "*", '|' '\"', "com1", "com2", "com3",
+                            "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4",
+                        "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "con", "nul", "prn"]
+            for i in illegal_filename:
+                filename = filename.replace(i, "")
+            if len(filename) == 0:
+                filename = "Untitled_Peer"
+            filename = "".join(filename.split(' '))
+            filename = filename + "_" + config_name
+        # 4. Tạo config
+        config_content = f"""# {data['name']}
+                [Interface]
+                PrivateKey = {private_key}
+                Address = {allowed_ips}
+                DNS = {DEFAULT_DNS}
 
-    except sqlite3.OperationalError as e:
-        conn.rollback()
-        print(f"Database error in create_client: {str(e)}")
-        if "no such table" in str(e):
-            # Thử khởi tạo lại database và bảng
-            conn.close()
-            init_db_for_config(config_name)
-            return jsonify({"error": "Database was just initialized. Please try again."})
-        return jsonify({"error": f"Database error: {str(e)}"})
-    except Exception as e:
-        conn.rollback()
-        print(f"Error creating client: {str(e)}")
-        return jsonify({"error": f"Failed to create client: {str(e)}"})
-        
-    finally:
-        conn.close()
+                [Peer]
+                PublicKey = {public_key}
+                Endpoint ={endpoint}
+                AllowedIPs = 0.0.0.0/0
+                PersistentKeepalive = {data.get('keep_alive', 25)}
+                """
+
+
+        # 6. Trả về file config
+    response = make_response(config_content)
+    response.headers['Content-Disposition'] = \
+            f'attachment; filename="{data["name"]}_wg.conf"'
+    return response
+import requests
 
 def get_public_ip():
     response = requests.get("https://ifconfig.me")
     print(response.text)
     return response.text.strip()
-
-def check_key_match(private_key, public_key):
-    """Kiểm tra xem private key có khớp với public key không"""
-    try:
-        generated_pubkey = subprocess.check_output(
-            ["wg", "pubkey"], 
-            input=private_key.encode(), 
-            text=True
-        ).strip()
-        return generated_pubkey == public_key
-    except Exception as e:
-        print(f"Error checking key match: {str(e)}")
-        return False
-
-
-def get_default_dns():
-    """Trả về DNS mặc định cho client"""
-    try:
-        # Đọc từ cấu hình nếu có
-        return "1.1.1.1, 8.8.8.8"
-    except:
-        # Giá trị mặc định
-        return "1.1.1.1, 8.8.8.8"
-
-
-def generate_random_name():
-    """Tạo tên ngẫu nhiên cho client"""
-    import random
-    import string
-    prefix = "client"
-    suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
-    return f"{prefix}-{suffix}"
-
-
-def get_server_pubkey(config_name):
-    """Lấy khóa công khai của server"""
-    try:
-        output = subprocess.check_output(
-            ["wg", "show", config_name, "public-key"],
-            text=True
-        ).strip()
-        return output
-    except Exception as e:
-        print(f"Error getting server public key: {str(e)}")
-        return ""
-
-
-def get_server_config(config_name):
-    """Lấy cấu hình server"""
-    try:
-        server_info = {}
-        
-        # Lấy địa chỉ IP của server
-        address_output = subprocess.check_output(
-            ["wg", "show", config_name, "listen-port"],
-            text=True
-        ).strip()
-        
-        # Lấy cấu hình interface 
-        ifconfig = subprocess.check_output(
-            ["ip", "-o", "-4", "addr", "show", config_name],
-            text=True
-        ).strip()
-        
-        # Parse địa chỉ IP
-        parts = ifconfig.split()
-        address = None
-        for i, part in enumerate(parts):
-            if part == "inet":
-                address = parts[i+1]
-                break
-        
-        if address:
-            server_info["Address"] = address.split('/')[0]
-        
-        # Lấy port
-        server_info["ListenPort"] = address_output
-        
-        # Lấy endpoint
-        public_ip = get_public_ip()
-        server_info["Endpoint"] = f"{public_ip}:{address_output}"
-        
-        # Lấy AllowedIPs (mặc định là tất cả traffic)
-        server_info["AllowedIPs"] = "0.0.0.0/0"
-        
-        return server_info
-    except Exception as e:
-        print(f"Error getting server config: {str(e)}")
-        return {
-            "Address": "10.0.0.1/24",
-            "ListenPort": "51820",
-            "Endpoint": "example.com:51820",
-            "AllowedIPs": "0.0.0.0/0"
-        }
 
 """
 Dashboard Initialization
@@ -1707,8 +1801,11 @@ def init_dashboard():
         config['Peers']['peer_keep_alive'] = "21"
     config.write(open(dashboard_conf, "w"))
     config.clear()
-
+import signal
+import sys
 if __name__ == "__main__":
+    signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
+    signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
     init_dashboard()
     config = configparser.ConfigParser(strict=False)
     config.read('wg-dashboard.ini')
