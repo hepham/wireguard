@@ -71,7 +71,7 @@ Mặc định, ứng dụng chạy trên cổng 10086 và có thể truy cập t
 - **Mô tả**: Hiển thị chi tiết của một cấu hình cụ thể
 
 #### Lấy thông tin cấu hình
-- **Endpoint**: `/get_config/<config_name>`
+- **Endpoint**: `/get_conf/<config_name>`
 - **Method**: GET
 - **Tham số**: search (tùy chọn để tìm kiếm peer)
 - **Mô tả**: Lấy thông tin chi tiết về cấu hình và các peer
