@@ -678,67 +678,65 @@ def get_all_peers_data(config_name):
         return get_all_peers_from_redis(config_name)
     
     # Get peers from WireGuard
-    try:
+
         # Get peers from WireGuard
-        wg_peers = get_wireguard_peers(config_name)
+    wg_peers = get_wireguard_peers(config_name)
+    
+    # Get peers from Redis
+    redis_peers = get_all_peers_from_redis(config_name)
+    redis_peers_dict = {peer['id']: peer for peer in redis_peers}
+    
+    # Update Redis with WireGuard data
+    for wg_peer in wg_peers:
+        peer_id = wg_peer['id']
         
-        # Get peers from Redis
-        redis_peers = get_all_peers_from_redis(config_name)
-        redis_peers_dict = {peer['id']: peer for peer in redis_peers}
-        
-        # Update Redis with WireGuard data
-        for wg_peer in wg_peers:
-            peer_id = wg_peer['id']
+        # Check if peer exists in Redis
+        if peer_id in redis_peers_dict:
+            # Update existing peer
+            redis_peer = redis_peers_dict[peer_id]
             
-            # Check if peer exists in Redis
-            if peer_id in redis_peers_dict:
-                # Update existing peer
-                redis_peer = redis_peers_dict[peer_id]
-                
-                # Update fields from WireGuard
-                update_data = {
-                    'latest_handshake': wg_peer.get('latest_handshake', ''),
-                    'allowed_ip': wg_peer.get('allowed_ip', ''),
-                    'transfer_rx': wg_peer.get('transfer_rx', '0'),
-                    'transfer_tx': wg_peer.get('transfer_tx', '0')
-                }
-                
-                # Update peer data in Redis
-                peer_key = get_peer_key(config_name, peer_id)
-                r.hset(peer_key, mapping=update_data)
-                
-                # Update last seen if handshake is recent
-                if wg_peer.get('latest_handshake', '') and wg_peer.get('latest_handshake', '') != 'Never':
-                    update_peer_last_seen(config_name, peer_id)
-            else:
-                # New peer found in WireGuard but not in Redis
-                new_peer = {
-                    'name': f'Peer_{peer_id[:8]}',
-                    'allowed_ip': wg_peer.get('allowed_ip', ''),
-                    'DNS': DEFAULT_DNS,
-                    'endpoint_allowed_ip': DEFAULT_ENDPOINT_ALLOWED_IP,
-                    'private_key': '',
-                    'mtu': '',
-                    'keepalive': '',
-                    'latest_handshake': wg_peer.get('latest_handshake', ''),
-                    'transfer_rx': wg_peer.get('transfer_rx', '0'),
-                    'transfer_tx': wg_peer.get('transfer_tx', '0'),
-                    'created_at': datetime.now().isoformat()
-                }
-                
-                # Save new peer to Redis
-                save_peer_to_redis(config_name, peer_id, new_peer)
-                
-                # Add to local dictionary for the return value
-                redis_peers_dict[peer_id] = new_peer
-                redis_peers_dict[peer_id]['id'] = peer_id
+            # Update fields from WireGuard
+            update_data = {
+                'latest_handshake': wg_peer.get('latest_handshake', ''),
+                'allowed_ip': wg_peer.get('allowed_ip', ''),
+                'transfer_rx': wg_peer.get('transfer_rx', '0'),
+                'transfer_tx': wg_peer.get('transfer_tx', '0')
+            }
+            
+            # Update peer data in Redis
+            peer_key = get_peer_key(config_name, peer_id)
+            r.hset(peer_key, mapping=update_data)
+            
+            # Update last seen if handshake is recent
+            if wg_peer.get('latest_handshake', '') and wg_peer.get('latest_handshake', '') != 'Never':
+                update_peer_last_seen(config_name, peer_id)
+        else:
+            # New peer found in WireGuard but not in Redis
+            new_peer = {
+                'name': f'Peer_{peer_id[:8]}',
+                'allowed_ip': wg_peer.get('allowed_ip', ''),
+                'DNS': DEFAULT_DNS,
+                'endpoint_allowed_ip': DEFAULT_ENDPOINT_ALLOWED_IP,
+                'private_key': '',
+                'mtu': '',
+                'keepalive': '',
+                'latest_handshake': wg_peer.get('latest_handshake', ''),
+                'transfer_rx': wg_peer.get('transfer_rx', '0'),
+                'transfer_tx': wg_peer.get('transfer_tx', '0'),
+                'created_at': datetime.now().isoformat()
+            }
+            
+            # Save new peer to Redis
+            save_peer_to_redis(config_name, peer_id, new_peer)
+            
+            # Add to local dictionary for the return value
+            redis_peers_dict[peer_id] = new_peer
+            redis_peers_dict[peer_id]['id'] = peer_id
+    
+    # Return all peers
+    return list(redis_peers_dict.values())
         
-        # Return all peers
-        return list(redis_peers_dict.values())
-        
-    except Exception as e:
-        print(f"Error getting peers from WireGuard: {str(e)}")
-        return get_all_peers_from_redis(config_name)
+   
 
 # Search for peers
 def get_peers(config_name, search="", sort="name"):
