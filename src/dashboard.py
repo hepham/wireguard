@@ -677,10 +677,79 @@ def get_all_peers_data(config_name):
         # Return peers from Redis if WireGuard is stopped
         return get_all_peers_from_redis(config_name)
     
-    # Get peers from WireGuard
-
-        # Get peers from WireGuard
-    wg_peers = get_wireguard_peers(config_name)
+    # Get peers from WireGuard directly instead of using get_wireguard_peers
+    wg_peers = []
+    try:
+        # Get all public keys
+        keys = get_conf_peer_key(config_name)
+        if not isinstance(keys, list):
+            return get_all_peers_from_redis(config_name)
+        
+        # Get dump from wireguard for handshake and transfer data
+        try:
+            dump_output = subprocess.check_output(
+                f"wg show {config_name} dump", 
+                shell=True
+            ).decode('utf-8').strip().split("\n")
+            
+            # Skip header
+            if len(dump_output) > 0:
+                dump_output = dump_output[1:]
+                
+            # Process dump
+            dump = {}
+            for line in dump_output:
+                peer_info = line.split("\t")
+                if len(peer_info) >= 6:
+                    peer_id = peer_info[0]
+                    
+                    # Parse handshake - convert to timestamp if possible
+                    handshake = peer_info[4]
+                    if handshake == "0":
+                        handshake = "Never"
+                    
+                    dump[peer_id] = {
+                        "latest_handshake": handshake,
+                        "transfer_rx": peer_info[5],
+                        "transfer_tx": peer_info[6]
+                    }
+        except Exception as e:
+            print(f"Error getting dump data: {str(e)}")
+            dump = {}
+        
+        # Process each peer
+        for key in keys:
+            peer = {"id": key}
+            
+            # Get allowed IPs
+            try:
+                allowed_ips = subprocess.check_output(
+                    f"wg show {config_name} allowed-ips | grep {key}",
+                    shell=True
+                ).decode('utf-8').strip()
+                
+                if allowed_ips:
+                    parts = allowed_ips.split("\t")
+                    if len(parts) > 1:
+                        peer["allowed_ip"] = parts[1].split(",")[0]
+            except:
+                peer["allowed_ip"] = ""
+            
+            # Get handshake and transfer data from dump
+            if key in dump:
+                peer_dump = dump[key]
+                peer["latest_handshake"] = peer_dump.get("latest_handshake", "Never")
+                peer["transfer_rx"] = peer_dump.get("transfer_rx", "0")
+                peer["transfer_tx"] = peer_dump.get("transfer_tx", "0")
+            else:
+                peer["latest_handshake"] = "Never"
+                peer["transfer_rx"] = "0"
+                peer["transfer_tx"] = "0"
+            
+            wg_peers.append(peer)
+    except Exception as e:
+        print(f"Error getting peers from WireGuard: {str(e)}")
+        return get_all_peers_from_redis(config_name)
     
     # Get peers from Redis
     redis_peers = get_all_peers_from_redis(config_name)
@@ -735,8 +804,6 @@ def get_all_peers_data(config_name):
     
     # Return all peers
     return list(redis_peers_dict.values())
-        
-   
 
 # Search for peers
 def get_peers(config_name, search="", sort="name"):
