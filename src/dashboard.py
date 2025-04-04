@@ -1624,35 +1624,42 @@ def traceroute_ip():
 @app.route('/create_client/<config_name>', methods=['POST'])
 def create_client(config_name):
     cleanup_inactive_peers()
-    db = TinyDB(f"db/{config_name}.json")
-    peers = Query()
-    data = request.get_json()
     
+    # Get Redis connection
+    r = get_redis_client()
+    if not r:
+        return jsonify({"error": "Redis connection not available"}), 500
+    
+    data = request.get_json()
     keys = get_conf_peer_key(config_name)
-    private_key=""
-    public_key=""
-    checkExist=False
-    config_content=""
-    for peer in db.all():
-        print("peer:",peer)
-        print("peer[name]:",peer["name"],",data[name]:",data["name"])
-        if(peer["name"]==data["name"]):
-            
+    private_key = ""
+    public_key = ""
+    checkExist = False
+    config_content = ""
+    
+    # Get all peers for this config to check for existing name
+    peers = get_all_peers_from_redis(config_name)
+    
+    # Check if peer with given name already exists
+    for peer in peers:
+        if peer.get("name") == data["name"]:
             config_content = f"""# {peer['name']}
-            [Interface]
-            PrivateKey = {peer['private_key']}
-            Address = {peer['allowed_ip']}
-            DNS = {DEFAULT_DNS}
+[Interface]
+PrivateKey = {peer.get('private_key', '')}
+Address = {peer.get('allowed_ip', '')}
+DNS = {DEFAULT_DNS}
 
-            [Peer]
-            PublicKey = {peer['public_key']}
-            Endpoint ={peer['endpoint_allowed_ip']}
-            AllowedIPs = 0.0.0.0/0
-            PersistentKeepalive = {data.get('keep_alive', 21)}
-            """
-            checkExist=True
+[Peer]
+PublicKey = {get_conf_pub_key(config_name)}
+Endpoint = {peer.get('endpoint_allowed_ip', DEFAULT_ENDPOINT_ALLOWED_IP)}
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = {data.get('keep_alive', 21)}
+"""
+            checkExist = True
             break
+            
     if not checkExist:
+        # Generate new key pair if peer doesn't exist
         check = False
         while not check:
             key = gen_private_key()
@@ -1661,86 +1668,109 @@ def create_client(config_name):
             if len(public_key) != 0 and public_key not in keys:
                 check = True
         
-
-    # 2. Tạo allowed_ips dạng 10.66.66.xx/32
-    
-        existing_ips = [
-        int(peer['allowed_ip'].split('.')[3].split('/')[0])
-        for peer in db.all()
-        if 'allowed_ip' in peer and peer['allowed_ip'].startswith(BASE_IP)
-        ]
-        
-        next_ip=2
-        for ip in range(2,255,1):
+        # Find available IP in the 10.66.66.x range
+        existing_ips = []
+        for peer in peers:
+            allowed_ip = peer.get('allowed_ip', '')
+            if allowed_ip and allowed_ip.startswith(BASE_IP):
+                try:
+                    ip_last_octet = int(allowed_ip.split('.')[3].split('/')[0])
+                    existing_ips.append(ip_last_octet)
+                except (IndexError, ValueError):
+                    pass
+                    
+        next_ip = 2
+        for ip in range(2, 255, 1):
             if ip not in existing_ips:
-                next_ip =ip
+                next_ip = ip
                 break
+                
         allowed_ips = f"{BASE_IP}.{next_ip}/32"
-        print("--------------------------------")
-        print("existing_ips:",existing_ips)
-        print("ip allowed_ip:",allowed_ips)
-        print("------------------------------")
-
-        # 3. Kiểm tra IP trùng
-        if db.search(peers.allowed_ips == allowed_ips):
-            return jsonify({"error": "IP đã tồn tại"}), 409
-        try:
-            status = subprocess.check_output(
-                "wg set " + config_name + " peer " + public_key + " allowed-ips " + allowed_ips, shell=True,
-                stderr=subprocess.STDOUT)
-            status = subprocess.check_output("wg-quick save " + config_name, shell=True, stderr=subprocess.STDOUT)
-            get_all_peers_data(config_name)
-
-        except subprocess.CalledProcessError as exc:
-            return exc.output.strip()
         
-        public_key_ip = public_key
-        public_key = get_conf_pub_key(config_name)
-        listen_port = get_conf_listen_port(config_name)
-        config = get_dashboard_conf()
-        endpoint = config.get("Peers","remote_endpoint") + ":" + listen_port
+        # Check for IP conflicts
+        ip_conflict = False
+        for peer in peers:
+            if peer.get('allowed_ip') == allowed_ips:
+                ip_conflict = True
+                break
+                
+        if ip_conflict:
+            return jsonify({"error": "IP already exists"}), 409
+            
         try:
-            db.update({"name": data['name'], "private_key": private_key, "DNS": DEFAULT_DNS,"public_key":public_key,
-            "endpoint_allowed_ip": endpoint,"allowed-ips":allowed_ips},
-            peers.id == public_key_ip)
-            db.close()
-        except subprocess.CalledProcessError as exc:
-            db.close()
-        filename = data["name"]
-        if len(filename) == 0:
-            filename = "Untitled_Peers"
-        else:
+            # Add to WireGuard
+            status = subprocess.check_output(
+                f"wg set {config_name} peer {public_key} allowed-ips {allowed_ips}", 
+                shell=True, stderr=subprocess.STDOUT
+            )
+            status = subprocess.check_output(
+                f"wg-quick save {config_name}", 
+                shell=True, stderr=subprocess.STDOUT
+            )
+            
+            # Get server details
+            server_public_key = get_conf_pub_key(config_name)
+            listen_port = get_conf_listen_port(config_name)
+            config = get_dashboard_conf()
+            endpoint = f"{config.get('Peers', 'remote_endpoint')}:{listen_port}"
+            
+            # Save peer to Redis
+            peer_data = {
+                "name": data['name'],
+                "private_key": private_key,
+                "DNS": DEFAULT_DNS,
+                "endpoint_allowed_ip": DEFAULT_ENDPOINT_ALLOWED_IP,
+                "allowed_ip": allowed_ips,
+                "status": "stopped",
+                "public_key": server_public_key,
+                "mtu": config.get("Peers", "peer_mtu", fallback="1420"),
+                "keepalive": data.get('keep_alive', 25),
+                "created_at": datetime.now().isoformat()
+            }
+            
+            save_peer_to_redis(config_name, public_key, peer_data)
+            
+            # Create filename
             filename = data["name"]
-                    # Clean filename
-            illegal_filename = [".", ",", "/", "?", "<", ">", "\\", ":", "*", '|' '\"', "com1", "com2", "com3",
-                            "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4",
-                        "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "con", "nul", "prn"]
-            for i in illegal_filename:
-                filename = filename.replace(i, "")
             if len(filename) == 0:
-                filename = "Untitled_Peer"
-            filename = "".join(filename.split(' '))
-            filename = filename + "_" + config_name
-        # 4. Tạo config
-        config_content = f"""# {data['name']}
-                [Interface]
-                PrivateKey = {private_key}
-                Address = {allowed_ips}
-                DNS = {DEFAULT_DNS}
+                filename = "Untitled_Peers"
+            else:
+                # Clean filename
+                illegal_filename = [".", ",", "/", "?", "<", ">", "\\", ":", "*", '|', '\"', "com1", "com2", "com3",
+                                "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4",
+                            "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "con", "nul", "prn"]
+                for i in illegal_filename:
+                    filename = filename.replace(i, "")
+                if len(filename) == 0:
+                    filename = "Untitled_Peer"
+                filename = "".join(filename.split(' '))
+                filename = f"{filename}_{config_name}"
+                
+            # Create config content
+            config_content = f"""# {data['name']}
+[Interface]
+PrivateKey = {private_key}
+Address = {allowed_ips}
+DNS = {DEFAULT_DNS}
 
-                [Peer]
-                PublicKey = {public_key}
-                Endpoint ={endpoint}
-                AllowedIPs = 0.0.0.0/0
-                PersistentKeepalive = {data.get('keep_alive', 25)}
-                """
+[Peer]
+PublicKey = {server_public_key}
+Endpoint = {endpoint}
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = {data.get('keep_alive', 25)}
+"""
 
+        except subprocess.CalledProcessError as exc:
+            return exc.output.decode('utf-8').strip()
+            
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
 
-        # 6. Trả về file config
+    # Return config file
     response = make_response(config_content)
-    response.headers['Content-Disposition'] = \
-            f'attachment; filename="{data["name"]}_wg.conf"'
+    response.headers['Content-Disposition'] = f'attachment; filename="{data["name"]}_wg.conf"'
     return response
+
 import requests
 
 def get_public_ip():
