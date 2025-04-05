@@ -101,7 +101,7 @@ def save_peer_to_redis(config_name, peer_id, peer_data):
     try:
         # Add peer ID to set of peers for this config
         peers_set_key = get_peers_set_key(config_name)
-        print(f"[DEBUG] Adding peer {peer_id} to set: {peers_set_key}")
+        # print(f"[DEBUG] Adding peer {peer_id} to set: {peers_set_key}")
         r.sadd(peers_set_key, peer_id)
         
         # Save peer data as hash
@@ -111,15 +111,15 @@ def save_peer_to_redis(config_name, peer_id, peer_data):
         string_data = {k: str(v) for k, v in peer_data.items()}
         
         # Save to Redis
-        print(f"[DEBUG] Saving peer data to key: {peer_key} with {len(string_data)} fields")
+        # print(f"[DEBUG] Saving peer data to key: {peer_key} with {len(string_data)} fields")
         r.hset(peer_key, mapping=string_data)
         
         # Update last seen
         update_peer_last_seen(config_name, peer_id)
         
         # Force save to disk
-        print(f"[DEBUG] Forcing Redis to save data to disk")
-        r.save()
+        # print(f"[DEBUG] Forcing Redis to save data to disk")
+        #r.save()
         
         return True
     except Exception as e:
@@ -154,23 +154,23 @@ def get_all_peers_from_redis(config_name):
     try:
         # Get all peer IDs for this config
         peers_set_key = get_peers_set_key(config_name)
-        print(f"[DEBUG] Fetching peers with key: {peers_set_key}")
+        #print(f"[DEBUG] Fetching peers with key: {peers_set_key}")
         peer_ids = r.smembers(peers_set_key)
         
         if not peer_ids:
-            print(f"[DEBUG] No peer IDs found for config: {config_name}")
+            #print(f"[DEBUG] No peer IDs found for config: {config_name}")
             return []
             
-        print(f"[DEBUG] Found {len(peer_ids)} peer IDs: {peer_ids}")
+        #print(f"[DEBUG] Found {len(peer_ids)} peer IDs: {peer_ids}")
         
         # Get data for each peer
         for peer_id in peer_ids:
             peer_key = get_peer_key(config_name, peer_id)
-            print(f"[DEBUG] Fetching peer data with key: {peer_key}")
+            #print(f"[DEBUG] Fetching peer data with key: {peer_key}")
             peer_data = r.hgetall(peer_key)
             
             if not peer_data:
-                print(f"[DEBUG] No data found for peer_id: {peer_id}")
+                #print(f"[DEBUG] No data found for peer_id: {peer_id}")
                 continue
                 
             print(f"[DEBUG] Found data for peer_id: {peer_id}, keys: {peer_data.keys()}")
@@ -179,7 +179,7 @@ def get_all_peers_from_redis(config_name):
             peer_data['id'] = peer_id
             peers.append(peer_data)
         
-        print(f"[DEBUG] Returning {len(peers)} peers for config: {config_name}")
+        #print(f"[DEBUG] Returning {len(peers)} peers for config: {config_name}")
         return peers
     except Exception as e:
         print(f"[ERROR] Error getting peers from Redis: {str(e)}")
@@ -1831,10 +1831,9 @@ def create_client(config_name):
     public_key = ""
     checkExist = False
     config_content = ""
-    print("here we go")
+
     # Get all peers for this config to check for existing name
     peers = get_all_peers_from_redis(config_name)
-    print("peer len:",len(peers))
     # Check if peer with given name already exists
     for peer in peers:
         print("peer:",peer.get('allowed_ip', ''))
@@ -1973,7 +1972,7 @@ import requests
 
 def get_public_ip():
     response = requests.get("https://ifconfig.me")
-    print(response.text)
+    # print(response.text)
     return response.text.strip()
 
 """
@@ -1981,7 +1980,7 @@ Dashboard Initialization
 """
 def init_dashboard():
     remote_endpoint=get_public_ip()
-    print("remote_endpoint:",remote_endpoint)
+    # print("remote_endpoint:",remote_endpoint)
     # Set Default INI File
     if not os.path.isfile("wg-dashboard.ini"):
         conf_file = open("wg-dashboard.ini", "w+")
