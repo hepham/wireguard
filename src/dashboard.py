@@ -1801,7 +1801,7 @@ def create_client(config_name):
         if peer.get("name") == data["name"]:
             print("peer:",peer)
             config_content = f"""# {peer['name']}
-[Interface]
+            
 PrivateKey = {peer.get('private_key', '')}
 Address = {peer.get('allowed_ip', '')}
 DNS = {DEFAULT_DNS}
@@ -1876,7 +1876,7 @@ PersistentKeepalive = {data.get('keep_alive', 21)}
                 "name": data['name'],
                 "private_key": private_key,
                 "DNS": DEFAULT_DNS,
-                "endpoint_allowed_ip": DEFAULT_ENDPOINT_ALLOWED_IP,
+                "endpoint_allowed_ip": endpoint,
                 "allowed_ip": allowed_ips,
                 "status": "stopped",
                 "public_key": server_public_key,
