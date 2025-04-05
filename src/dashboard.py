@@ -1799,6 +1799,7 @@ def create_client(config_name):
     # Check if peer with given name already exists
     for peer in peers:
         if peer.get("name") == data["name"]:
+            print("peer:",peer)
             config_content = f"""# {peer['name']}
 [Interface]
 PrivateKey = {peer.get('private_key', '')}
