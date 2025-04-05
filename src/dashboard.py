@@ -1828,6 +1828,7 @@ PersistentKeepalive = {data.get('keep_alive', 21)}
         # Find available IP in the 10.66.66.x range
         existing_ips = []
         for peer in peers:
+            print("peer:",peer.get('allowed_ip', ''))
             allowed_ip = peer.get('allowed_ip', '')
             if allowed_ip and allowed_ip.startswith(BASE_IP):
                 try:
