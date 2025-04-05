@@ -1792,7 +1792,7 @@ def create_client(config_name):
     public_key = ""
     checkExist = False
     config_content = ""
-    
+    print("here we go")
     # Get all peers for this config to check for existing name
     peers = get_all_peers_from_redis(config_name)
     
