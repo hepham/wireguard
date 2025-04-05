@@ -47,7 +47,7 @@ def get_redis_client(max_retries=3, retry_delay=1):
     """Get Redis client with retry mechanism"""
     for attempt in range(max_retries):
         try:
-            print(f"[DEBUG] Connecting to Redis (attempt {attempt+1}/{max_retries}): {REDIS_HOST}:{REDIS_PORT}")
+            #print(f"[DEBUG] Connecting to Redis (attempt {attempt+1}/{max_retries}): {REDIS_HOST}:{REDIS_PORT}")
             r = redis.Redis(
                 host=REDIS_HOST,
                 port=REDIS_PORT,
@@ -57,12 +57,12 @@ def get_redis_client(max_retries=3, retry_delay=1):
             )
             # Test connection
             ping_result = r.ping()
-            print(f"[DEBUG] Redis connection successful, ping result: {ping_result}")
+            #print(f"[DEBUG] Redis connection successful, ping result: {ping_result}")
             return r
         except redis.exceptions.ConnectionError as e:
             print(f"[ERROR] Error connecting to Redis: {e}")
             if attempt < max_retries - 1:
-                print(f"[DEBUG] Retrying in {retry_delay} seconds...")
+                #print(f"[DEBUG] Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
             else:
                 print(f"[ERROR] All {max_retries} connection attempts to Redis failed")
@@ -173,7 +173,7 @@ def get_all_peers_from_redis(config_name):
                 #print(f"[DEBUG] No data found for peer_id: {peer_id}")
                 continue
                 
-            print(f"[DEBUG] Found data for peer_id: {peer_id}, keys: {peer_data.keys()}")
+            # print(f"[DEBUG] Found data for peer_id: {peer_id}, keys: {peer_data.keys()}")
             
             # Add ID to the data
             peer_data['id'] = peer_id
