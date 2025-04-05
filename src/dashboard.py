@@ -1883,7 +1883,7 @@ PersistentKeepalive = {data.get('keep_alive', 21)}
                 break
                 
         allowed_ips = f"{BASE_IP}.{next_ip}/32"
-        
+        print("current ip:",allowed_ips)
         # Check for IP conflicts
         ip_conflict = False
         for peer in peers:
