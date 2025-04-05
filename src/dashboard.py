@@ -47,6 +47,7 @@ def get_redis_client(max_retries=3, retry_delay=1):
     """Get Redis client with retry mechanism"""
     for attempt in range(max_retries):
         try:
+            print(f"[DEBUG] Connecting to Redis (attempt {attempt+1}/{max_retries}): {REDIS_HOST}:{REDIS_PORT}")
             r = redis.Redis(
                 host=REDIS_HOST,
                 port=REDIS_PORT,
@@ -55,13 +56,25 @@ def get_redis_client(max_retries=3, retry_delay=1):
                 decode_responses=True  # Automatically decode responses to strings
             )
             # Test connection
-            r.ping()
+            ping_result = r.ping()
+            print(f"[DEBUG] Redis connection successful, ping result: {ping_result}")
             return r
         except redis.exceptions.ConnectionError as e:
-            print(f"Error connecting to Redis: {e}")
+            print(f"[ERROR] Error connecting to Redis: {e}")
             if attempt < max_retries - 1:
-                print(f"Retrying in {retry_delay} seconds...")
+                print(f"[DEBUG] Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
+            else:
+                print(f"[ERROR] All {max_retries} connection attempts to Redis failed")
+        except Exception as e:
+            print(f"[ERROR] Unexpected error connecting to Redis: {str(e)}")
+            import traceback
+            print(f"[ERROR] Traceback: {traceback.format_exc()}")
+            if attempt < max_retries - 1:
+                print(f"[DEBUG] Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+            else:
+                print(f"[ERROR] All {max_retries} connection attempts to Redis failed")
     return None
 
 # Redis key helpers
@@ -82,11 +95,13 @@ def save_peer_to_redis(config_name, peer_id, peer_data):
     """Save peer data to Redis"""
     r = get_redis_client()
     if not r:
+        print(f"[ERROR] Redis connection failed when saving peer: {peer_id} for config: {config_name}")
         return False
     
     try:
         # Add peer ID to set of peers for this config
         peers_set_key = get_peers_set_key(config_name)
+        print(f"[DEBUG] Adding peer {peer_id} to set: {peers_set_key}")
         r.sadd(peers_set_key, peer_id)
         
         # Save peer data as hash
@@ -96,14 +111,21 @@ def save_peer_to_redis(config_name, peer_id, peer_data):
         string_data = {k: str(v) for k, v in peer_data.items()}
         
         # Save to Redis
+        print(f"[DEBUG] Saving peer data to key: {peer_key} with {len(string_data)} fields")
         r.hset(peer_key, mapping=string_data)
         
         # Update last seen
         update_peer_last_seen(config_name, peer_id)
         
+        # Force save to disk
+        print(f"[DEBUG] Forcing Redis to save data to disk")
+        r.save()
+        
         return True
     except Exception as e:
-        print(f"Error saving peer to Redis: {str(e)}")
+        print(f"[ERROR] Error saving peer to Redis: {str(e)}")
+        import traceback
+        print(f"[ERROR] Traceback: {traceback.format_exc()}")
         return False
 
 def update_peer_last_seen(config_name, peer_id):
@@ -125,27 +147,44 @@ def get_all_peers_from_redis(config_name):
     """Get all peers for a config from Redis"""
     r = get_redis_client()
     if not r:
+        print(f"[ERROR] Redis connection failed for config: {config_name}")
         return []
     
     peers = []
     try:
         # Get all peer IDs for this config
         peers_set_key = get_peers_set_key(config_name)
+        print(f"[DEBUG] Fetching peers with key: {peers_set_key}")
         peer_ids = r.smembers(peers_set_key)
+        
+        if not peer_ids:
+            print(f"[DEBUG] No peer IDs found for config: {config_name}")
+            return []
+            
+        print(f"[DEBUG] Found {len(peer_ids)} peer IDs: {peer_ids}")
         
         # Get data for each peer
         for peer_id in peer_ids:
             peer_key = get_peer_key(config_name, peer_id)
+            print(f"[DEBUG] Fetching peer data with key: {peer_key}")
             peer_data = r.hgetall(peer_key)
             
-            if peer_data:
-                # Add ID to the data
-                peer_data['id'] = peer_id
-                peers.append(peer_data)
+            if not peer_data:
+                print(f"[DEBUG] No data found for peer_id: {peer_id}")
+                continue
+                
+            print(f"[DEBUG] Found data for peer_id: {peer_id}, keys: {peer_data.keys()}")
+            
+            # Add ID to the data
+            peer_data['id'] = peer_id
+            peers.append(peer_data)
         
+        print(f"[DEBUG] Returning {len(peers)} peers for config: {config_name}")
         return peers
     except Exception as e:
-        print(f"Error getting peers from Redis: {str(e)}")
+        print(f"[ERROR] Error getting peers from Redis: {str(e)}")
+        import traceback
+        print(f"[ERROR] Traceback: {traceback.format_exc()}")
         return []
 
 def get_peer_from_redis(config_name, peer_id):
@@ -2209,3 +2248,58 @@ def get_conf_peer_data(config_name):
     except Exception as e:
         print(f"Error in get_conf_peer_data: {str(e)}")
         return {}
+
+def diagnose_redis_connection():
+    """Diagnose Redis connection and check existing keys"""
+    print("[DEBUG] Starting Redis connection diagnosis...")
+    r = get_redis_client(max_retries=1)
+    
+    if not r:
+        print("[ERROR] Failed to connect to Redis server")
+        return False
+    
+    try:
+        # Check server info
+        info = r.info()
+        print(f"[DEBUG] Redis version: {info.get('redis_version')}")
+        print(f"[DEBUG] Connected clients: {info.get('connected_clients')}")
+        print(f"[DEBUG] Used memory: {info.get('used_memory_human')}")
+        
+        # Check existing keys for WireGuard
+        all_keys = r.keys(f"{REDIS_PREFIX}*")
+        print(f"[DEBUG] Found {len(all_keys)} WireGuard related keys in Redis")
+        
+        # Check for config sets
+        config_sets = [k for k in all_keys if k.endswith(":peers")]
+        print(f"[DEBUG] Found {len(config_sets)} configuration sets: {config_sets}")
+        
+        # Check peer counts for each config
+        for config_set in config_sets:
+            config_name = config_set.replace(f"{REDIS_PREFIX}", "").replace(":peers", "")
+            peers_count = r.scard(config_set)
+            print(f"[DEBUG] Config '{config_name}' has {peers_count} peers")
+            
+            # Sample peer IDs
+            sample_peers = list(r.smembers(config_set))[:5]  # Get up to 5 peers
+            print(f"[DEBUG] Sample peer IDs for '{config_name}': {sample_peers}")
+            
+            # Check sample peer data
+            for peer_id in sample_peers:
+                peer_key = get_peer_key(config_name, peer_id)
+                peer_exists = r.exists(peer_key)
+                peer_fields = r.hkeys(peer_key) if peer_exists else []
+                print(f"[DEBUG] Peer {peer_id} data exists: {peer_exists}, fields: {peer_fields}")
+        
+        return True
+    except Exception as e:
+        print(f"[ERROR] Error diagnosing Redis: {str(e)}")
+        import traceback
+        print(f"[ERROR] Traceback: {traceback.format_exc()}")
+        return False
+
+# Add this near the initialization code or function
+@app.route('/diagnose_redis', methods=['GET'])
+def api_diagnose_redis():
+    """API endpoint to diagnose Redis connection"""
+    result = diagnose_redis_connection()
+    return jsonify({"success": result})
