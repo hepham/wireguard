@@ -1795,7 +1795,7 @@ def create_client(config_name):
     print("here we go")
     # Get all peers for this config to check for existing name
     peers = get_all_peers_from_redis(config_name)
-    
+    print("peer len:",len(peers))
     # Check if peer with given name already exists
     for peer in peers:
         print("peer:",peer.get('allowed_ip', ''))
