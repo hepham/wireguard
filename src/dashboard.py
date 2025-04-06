@@ -2184,7 +2184,7 @@ def cleanup_thread(interval=20):
         try:
             print("[INFO] Running scheduled cleanup of inactive peers")
             # Lấy tất cả cấu hình WireGuard hiện có
-            cleanup_inactive_peers(config, threshold=20)
+            cleanup_inactive_peers()
         except Exception as e:
             print(f"[ERROR] Error in cleanup thread: {str(e)}")
         # Chờ đến lần chạy tiếp theo
