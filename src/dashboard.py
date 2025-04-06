@@ -1998,8 +1998,9 @@ PersistentKeepalive = {data.get('keep_alive', 21)}
     if not checkExist:
         # Sử dụng Lua script để cấp phát IP nguyên tử
         r = get_redis_client()
-        private_key = ""
-        public_key = ""
+        private_key = gen_private_key()
+        public_key = gen_public_key(private_key)
+        print("private_key:",private_key)
         while private_key=="":
         # Tạo private và public key trước
             private_key = gen_private_key()
