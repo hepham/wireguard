@@ -2027,7 +2027,7 @@ PersistentKeepalive = {data.get('keep_alive', 21)}
             return jsonify({"error": "No IP addresses available"}), 409
             
         allowed_ips = f"{BASE_IP}.{next_ip}/32"
-        
+        print("allowed_ips:",allowed_ips)
         # Generate new key pair if peer doesn't exist
         check = False
         while not check:
