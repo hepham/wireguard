@@ -335,7 +335,7 @@ def search_peers_in_redis(config_name, search_term=None, sort_field=None):
     
     return peers
 
-def cleanup_inactive_peers(config_name='wg0', threshold=180):
+def cleanup_inactive_peers(config_name='wg0', threshold=20):
     """Xóa các peer không hoạt động trong 3 phút"""
     try:
         # Lấy danh sách peer hiện tại từ WireGuard
@@ -370,7 +370,7 @@ def cleanup_inactive_peers(config_name='wg0', threshold=180):
             handshake_time = active_peers.get(peer_id, 0)
             print(f"handshake_time: {handshake_time}")
             # Kiểm tra thời gian không hoạt động
-            if handshake_time == 0 or (current_time - handshake_time) > threshold:
+            if (current_time - handshake_time) > threshold:
                 try:
                     # Xóa khỏi WireGuard
                     subprocess.check_call([
