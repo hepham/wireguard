@@ -358,7 +358,7 @@ def cleanup_inactive_peers(config_name='wg0', threshold=180):
 
         for peer_id in peer_ids:
             handshake_time = active_peers.get(peer_id, 0)
-
+            print(f"handshake_time: {handshake_time}")
             # Kiểm tra thời gian không hoạt động
             if handshake_time == 0 or (current_time - handshake_time) > threshold:
                 try:
