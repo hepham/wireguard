@@ -41,6 +41,47 @@ REDIS_PORT = 6379
 REDIS_DB = 0
 REDIS_PASSWORD = None  # Set this if your Redis server requires authentication
 REDIS_PREFIX = 'wireguard:'
+import fcntl
+import errno
+import contextlib
+
+# Create a context manager for file locking
+@contextlib.contextmanager
+def file_lock(lock_file):
+    """Context manager for file-based locking to prevent concurrent access"""
+    lock_path = f"/tmp/wg_dashboard_{lock_file}.lock"
+    try:
+        # Open lock file
+        with open(lock_path, 'w') as f:
+            try:
+                # Try to acquire an exclusive lock (non-blocking)
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # We got the lock, yield control back to the context
+                yield
+            except IOError as e:
+                # Resource temporarily unavailable - another process has the lock
+                if e.errno == errno.EAGAIN:
+                    print(f"[WARNING] Another process is saving the {lock_file} configuration. Waiting for lock...")
+                    # Try again but block until we get the lock
+                    fcntl.flock(f, fcntl.LOCK_EX)
+                    yield
+                else:
+                    # Some other kind of IO error occurred
+                    raise
+            finally:
+                # Release the lock
+                fcntl.flock(f, fcntl.LOCK_UN)
+    except IOError as e:
+        print(f"[ERROR] Failed to obtain lock for {lock_file}: {str(e)}")
+        # Still yield control, even if we couldn't get a lock
+        yield
+    finally:
+        # Clean up the lock file if possible
+        try:
+            os.remove(lock_path)
+        except:
+            pass
+
 def save_wireguard_config(config_name):
     """Save WireGuard configuration with file locking to prevent race conditions"""
     with file_lock(config_name):
@@ -2457,46 +2498,6 @@ def configure_redis_persistence():
         print(f"[ERROR] Failed to configure Redis persistence: {str(e)}")
         return False
 
-import fcntl
-import errno
-import contextlib
-
-# Create a context manager for file locking
-@contextlib.contextmanager
-def file_lock(lock_file):
-    """Context manager for file-based locking to prevent concurrent access"""
-    lock_path = f"/tmp/wg_dashboard_{lock_file}.lock"
-    try:
-        # Open lock file
-        with open(lock_path, 'w') as f:
-            try:
-                # Try to acquire an exclusive lock (non-blocking)
-                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                # We got the lock, yield control back to the context
-                yield
-            except IOError as e:
-                # Resource temporarily unavailable - another process has the lock
-                if e.errno == errno.EAGAIN:
-                    print(f"[WARNING] Another process is saving the {lock_file} configuration. Waiting for lock...")
-                    # Try again but block until we get the lock
-                    fcntl.flock(f, fcntl.LOCK_EX)
-                    yield
-                else:
-                    # Some other kind of IO error occurred
-                    raise
-            finally:
-                # Release the lock
-                fcntl.flock(f, fcntl.LOCK_UN)
-    except IOError as e:
-        print(f"[ERROR] Failed to obtain lock for {lock_file}: {str(e)}")
-        # Still yield control, even if we couldn't get a lock
-        yield
-    finally:
-        # Clean up the lock file if possible
-        try:
-            os.remove(lock_path)
-        except:
-            pass
 
 # Safe function to save WireGuard configuration
 
