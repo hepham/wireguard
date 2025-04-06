@@ -117,9 +117,8 @@ def save_peer_to_redis(config_name, peer_id, peer_data):
         # Update last seen
         update_peer_last_seen(config_name, peer_id)
         
-        # Force save to disk
-        # print(f"[DEBUG] Forcing Redis to save data to disk")
-        #r.save()
+        # Force save to disk for critical operations
+        r.save()
         
         return True
     except Exception as e:
@@ -226,6 +225,9 @@ def delete_peer_from_redis(config_name, peer_id):
         # Delete last seen data
         last_seen_key = get_last_seen_key(config_name, peer_id)
         r.delete(last_seen_key)
+        
+        # Force save to disk for critical operations
+        r.save()
         
         return True
     except Exception as e:
@@ -980,46 +982,105 @@ def get_conf_list():
 
 # Generate private key
 def gen_private_key():
-    gen = subprocess.check_output('wg genkey > private_key.txt && wg pubkey < private_key.txt > public_key.txt',
-                                  shell=True)
-    private = open('private_key.txt')
-    private_key = private.readline().strip()
-    public = open('public_key.txt')
-    public_key = public.readline().strip()
-    data = {"private_key": private_key, "public_key": public_key}
-    private.close()
-    public.close()
-    os.remove('private_key.txt')
-    os.remove('public_key.txt')
-    return data
+    """Generate WireGuard private key with unique temp files to prevent race conditions"""
+    import tempfile
+    import os
+    
+    # Create unique temporary files
+    private_file = tempfile.NamedTemporaryFile(delete=False)
+    public_file = tempfile.NamedTemporaryFile(delete=False)
+    
+    try:
+        # Close files so they can be used by shell commands
+        private_file.close()
+        public_file.close()
+        
+        # Generate keys using the unique temporary filenames
+        subprocess.check_output(f'wg genkey > {private_file.name} && wg pubkey < {private_file.name} > {public_file.name}', 
+                                shell=True)
+        
+        # Read the keys
+        with open(private_file.name, 'r') as f:
+            private_key = f.readline().strip()
+            
+        with open(public_file.name, 'r') as f:
+            public_key = f.readline().strip()
+            
+        # Return the data
+        return {"private_key": private_key, "public_key": public_key}
+    
+    finally:
+        # Make sure to clean up the temp files even if there's an error
+        try:
+            os.unlink(private_file.name)
+        except:
+            pass
+            
+        try:
+            os.unlink(public_file.name)
+        except:
+            pass
 
 # Generate public key
 def gen_public_key(private_key):
-    pri_key_file = open('private_key.txt', 'w')
-    pri_key_file.write(private_key)
-    pri_key_file.close()
+    """Generate WireGuard public key from private key with unique temp files"""
+    import tempfile
+    import os
+    
+    # Create unique temporary files
+    private_file = tempfile.NamedTemporaryFile(delete=False)
+    public_file = tempfile.NamedTemporaryFile(delete=False)
+    
     try:
-        check = subprocess.check_output("wg pubkey < private_key.txt > public_key.txt", shell=True)
-        public = open('public_key.txt')
-        public_key = public.readline().strip()
-        os.remove('private_key.txt')
-        os.remove('public_key.txt')
-        return {"status": 'success', "msg": "", "data": public_key}
-    except subprocess.CalledProcessError as exc:
-        os.remove('private_key.txt')
-        return {"status": 'failed', "msg": "Key is not the correct length or format", "data": ""}
+        # Write private key to file
+        with open(private_file.name, 'w') as f:
+            f.write(private_key)
+        
+        # Generate public key
+        try:
+            subprocess.check_output(f'wg pubkey < {private_file.name} > {public_file.name}', 
+                                   shell=True)
+            
+            # Read public key
+            with open(public_file.name, 'r') as f:
+                public_key = f.readline().strip()
+                
+            return {"status": 'success', "msg": "", "data": public_key}
+        except subprocess.CalledProcessError as exc:
+            return {"status": 'failed', "msg": "Key is not the correct length or format", "data": ""}
+    
+    finally:
+        # Clean up temporary files
+        try:
+            os.unlink(private_file.name)
+        except:
+            pass
+            
+        try:
+            os.unlink(public_file.name)
+        except:
+            pass
 
 # Check if private key and public key match
 def checkKeyMatch(private_key, public_key, config_name):
+    """Check if private and public keys match using Redis"""
     result = gen_public_key(private_key)
     if result['status'] == 'failed':
         return result
     else:
-        db = TinyDB('db/' + config_name + '.json')
-        peers = Query()
-        match = db.search(peers.id == result['data'])
-        if len(match) != 1 or result['data'] != public_key:
-            return {'status': 'failed', 'msg': 'Please check your private key, it does not match with the public key.'}
+        # Get Redis connection
+        r = get_redis_client()
+        if not r:
+            return {'status': 'failed', 'msg': 'Redis connection not available'}
+            
+        # Check if peer exists
+        peer_key = get_peer_key(config_name, public_key)
+        if not r.exists(peer_key):
+            return {'status': 'failed', 'msg': 'Peer not found in database'}
+            
+        # Check if keys match
+        if result['data'] != public_key:
+            return {'status': 'failed', 'msg': 'Private key does not match with the public key.'}
         else:
             return {'status': 'success'}
 
@@ -1986,6 +2047,10 @@ def init_dashboard():
         conf_file = open("wg-dashboard.ini", "w+")
     config = configparser.ConfigParser(strict=False)
     config.read(dashboard_conf)
+    
+    # Try to configure Redis persistence
+    configure_redis_persistence()
+    
     # Defualt dashboard account setting
     if "Account" not in config:
         config['Account'] = {}
@@ -2302,3 +2367,33 @@ def api_diagnose_redis():
     """API endpoint to diagnose Redis connection"""
     result = diagnose_redis_connection()
     return jsonify({"success": result})
+
+# Configure Redis persistence
+def configure_redis_persistence():
+    """Configure Redis to save data to disk properly"""
+    r = get_redis_client()
+    if not r:
+        print("[ERROR] Failed to configure Redis persistence - connection failed")
+        return False
+    
+    try:
+        # Check if persistence is already configured
+        config = r.config_get('save')
+        
+        # Configure automatic saving
+        # Save if at least 1 key changes in 60 seconds
+        r.config_set('save', '60 1')
+        
+        # Force an immediate save
+        save_result = r.save()
+        print(f"[INFO] Redis persistence configured, save result: {save_result}")
+        
+        return True
+    except redis.exceptions.ResponseError as e:
+        # This can happen in protected mode or when CONFIG commands are disabled
+        print(f"[WARNING] Could not configure Redis persistence: {str(e)}")
+        print("[WARNING] Make sure your Redis configuration allows persistence")
+        return False
+    except Exception as e:
+        print(f"[ERROR] Failed to configure Redis persistence: {str(e)}")
+        return False
