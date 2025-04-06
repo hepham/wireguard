@@ -41,7 +41,23 @@ REDIS_PORT = 6379
 REDIS_DB = 0
 REDIS_PASSWORD = None  # Set this if your Redis server requires authentication
 REDIS_PREFIX = 'wireguard:'
-
+def save_wireguard_config(config_name):
+    """Save WireGuard configuration with file locking to prevent race conditions"""
+    with file_lock(config_name):
+        try:
+            # Make sure the directory exists
+            os.makedirs('/etc/wireguard', exist_ok=True)
+            
+            # Save configuration
+            result = subprocess.check_output(['wg-quick', 'save', config_name], stderr=subprocess.STDOUT)
+            print(f"[INFO] Configuration saved for {config_name}")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"[ERROR] Failed to save configuration for {config_name}: {e.output.decode()}")
+            return False
+        except Exception as e:
+            print(f"[ERROR] Unexpected error saving configuration for {config_name}: {str(e)}")
+            return False
 # Redis connection with retry
 def get_redis_client(max_retries=3, retry_delay=1):
     """Get Redis client with retry mechanism"""
@@ -2483,23 +2499,7 @@ def file_lock(lock_file):
             pass
 
 # Safe function to save WireGuard configuration
-def save_wireguard_config(config_name):
-    """Save WireGuard configuration with file locking to prevent race conditions"""
-    with file_lock(config_name):
-        try:
-            # Make sure the directory exists
-            os.makedirs('/etc/wireguard', exist_ok=True)
-            
-            # Save configuration
-            result = subprocess.check_output(['wg-quick', 'save', config_name], stderr=subprocess.STDOUT)
-            print(f"[INFO] Configuration saved for {config_name}")
-            return True
-        except subprocess.CalledProcessError as e:
-            print(f"[ERROR] Failed to save configuration for {config_name}: {e.output.decode()}")
-            return False
-        except Exception as e:
-            print(f"[ERROR] Unexpected error saving configuration for {config_name}: {str(e)}")
-            return False
+
 
 def save_server_setting(request_data, config_name):
     status_code = 400
