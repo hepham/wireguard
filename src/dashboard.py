@@ -2129,7 +2129,7 @@ PersistentKeepalive = {data.get('keep_alive', 25)}
         except Exception as e:
             return jsonify({"error": str(e)}), 500
 
-
+    print(config_content)
     # Return config file
     response = make_response(config_content)
     response.headers['Content-Disposition'] = f'attachment; filename="{data["name"]}_wg.conf"'
