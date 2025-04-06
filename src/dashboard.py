@@ -2050,7 +2050,85 @@ PersistentKeepalive = {data.get('keep_alive', 21)}
             
         allowed_ips = f"{BASE_IP}.{next_ip}/32"
         
-        # Tiếp tục logic tạo client hiện tại...
+        # Check for IP conflicts
+        ip_conflict = False
+        for peer in peers:
+            if peer.get('allowed_ip') == allowed_ips:
+                ip_conflict = True
+                break
+                
+        if ip_conflict:
+            return jsonify({"error": "IP already exists"}), 409
+            
+        try:
+            # Add to WireGuard
+            status = subprocess.check_output(
+                f"wg set {config_name} peer {public_key} allowed-ips {allowed_ips}", 
+                shell=True, stderr=subprocess.STDOUT
+            )
+            
+            # Save configuration with locking
+            if not save_wireguard_config(config_name):
+                return jsonify({"error": "Failed to save WireGuard configuration"}), 500
+            
+            # Get server details
+            server_public_key = get_conf_pub_key(config_name)
+            listen_port = get_conf_listen_port(config_name)
+            config = get_dashboard_conf()
+            endpoint = f"{config.get('Peers', 'remote_endpoint')}:{listen_port}"
+            
+            # Save peer to Redis
+            peer_data = {
+                "name": data['name'],
+                "private_key": private_key,
+                "DNS": DEFAULT_DNS,
+                "endpoint_allowed_ip": endpoint,
+                "allowed_ip": allowed_ips,
+                "status": "stopped",
+                "public_key": server_public_key,
+                "mtu": config.get("Peers", "peer_mtu", fallback="1420"),
+                "keepalive": data.get('keep_alive', 25),
+                "created_at": datetime.now().isoformat()
+            }
+            
+            save_peer_to_redis(config_name, public_key, peer_data)
+            
+            # Create filename
+            filename = data["name"]
+            if len(filename) == 0:
+                filename = "Untitled_Peers"
+            else:
+                # Clean filename
+                illegal_filename = [".", ",", "/", "?", "<", ">", "\\", ":", "*", '|', '\"', "com1", "com2", "com3",
+                                "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4",
+                            "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "con", "nul", "prn"]
+                for i in illegal_filename:
+                    filename = filename.replace(i, "")
+                if len(filename) == 0:
+                    filename = "Untitled_Peer"
+                filename = "".join(filename.split(' '))
+                filename = f"{filename}_{config_name}"
+                
+            # Create config content
+            config_content = f"""# {data['name']}
+[Interface]
+PrivateKey = {private_key}
+Address = {allowed_ips}
+DNS = {DEFAULT_DNS}
+
+[Peer]
+PublicKey = {server_public_key}
+Endpoint = {endpoint}
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = {data.get('keep_alive', 25)}
+"""
+
+        except subprocess.CalledProcessError as exc:
+            return exc.output.decode('utf-8').strip()
+            
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
 
     # Return config file
     response = make_response(config_content)
