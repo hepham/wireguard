@@ -9,9 +9,42 @@ Dashboard WireGuard cung cấp giao diện web để quản lý các kết nối
 ## Cài đặt và Khởi động
 
 ### Yêu cầu hệ thống
-- Python 3.6+ 
+- Python 3.7+ 
 - WireGuard đã được cài đặt
-- Các thư viện Python: Flask, tinydb, ifcfg, flask_qrcode, icmplib
+- Redis server
+- Các thư viện Python: Flask, tinydb, ifcfg, flask_qrcode, icmplib, redis, ping3, configparser, qrcode
+
+### Cài đặt Redis
+Redis là bắt buộc cho Dashboard WireGuard phiên bản mới. Cài đặt Redis theo hệ điều hành của bạn:
+
+#### Ubuntu/Debian
+```bash
+sudo apt update
+sudo apt install redis-server
+sudo systemctl enable redis-server
+sudo systemctl start redis-server
+```
+
+#### CentOS/RHEL
+```bash
+sudo yum install epel-release
+sudo yum install redis
+sudo systemctl enable redis
+sudo systemctl start redis
+```
+
+#### Arch Linux
+```bash
+sudo pacman -S redis
+sudo systemctl enable redis
+sudo systemctl start redis
+```
+
+#### Windows
+Tải Redis từ [GitHub](https://github.com/microsoftarchive/redis/releases) hoặc cài đặt thông qua Chocolatey:
+```
+choco install redis-64
+```
 
 ### Cách chạy
 1. Clone mã nguồn:
@@ -22,7 +55,7 @@ cd wireGuard
 
 2. Cài đặt các thư viện phụ thuộc:
 ```
-pip install flask tinydb ifcfg flask_qrcode icmplib
+pip install -r src/requirements.txt
 ```
 
 3. Chạy ứng dụng:
@@ -40,8 +73,6 @@ Mặc định, ứng dụng chạy trên cổng 10086 và có thể truy cập t
 2. **Xác thực**: Người dùng đăng nhập với thông tin mặc định (tên người dùng: admin, mật khẩu: admin)
 3. **Quản lý cấu hình**: Hiển thị và quản lý các cấu hình WireGuard
 4. **Quản lý peer**: Thêm, xóa, sửa các peer trong mỗi cấu hình
-
-![Luồng hoạt động](https://i.imgur.com/example2.jpg)
 
 ## Các API chính
 
@@ -183,10 +214,21 @@ Mặc định, ứng dụng chạy trên cổng 10086 và có thể truy cập t
 - **Dữ liệu**: ip
 - **Mô tả**: Theo dõi đường đi của gói tin tới một IP
 
+## Cải tiến mới
+
+### Cơ chế khóa tập tin
+Hệ thống hiện sử dụng cơ chế khóa tập tin để ngăn chặn xung đột khi nhiều người dùng cập nhật cấu hình WireGuard cùng lúc.
+
+### Lưu trữ Redis
+Thông tin peer bây giờ được lưu trữ trong Redis thay vì TinyDB để cải thiện hiệu suất và độ tin cậy.
+
+### Cấu trúc mô-đun
+Mã nguồn đã được tái cấu trúc thành các mô-đun riêng biệt để dễ bảo trì và mở rộng.
+
 ## Tính năng tự động
 
 ### Dọn dẹp peer không hoạt động
-Hệ thống tự động dọn dẹp các peer không hoạt động sau một khoảng thời gian (mặc định là 3 phút).
+Hệ thống tự động dọn dẹp các peer không hoạt động sau một khoảng thời gian (mặc định là 180 phút hoặc 3 ngày).
 
 ## Ví dụ
 
@@ -209,35 +251,33 @@ curl -X POST http://localhost:10086/ping_ip \
   -d "ip=10.66.66.2&count=4"
 ```
 
-## Cấu trúc dữ liệu
+## Cấu trúc dữ liệu Redis
 
-Dữ liệu của peer được lưu trong TinyDB với các trường:
-- id: Khóa công khai 
+Dữ liệu của peer được lưu trong Redis với các khóa có định dạng `{config_name}_peer:{peer_id}`:
 - private_key: Khóa riêng tư (tùy chọn)
 - name: Tên peer
 - allowed_ip: Địa chỉ IP được cấp 
-- endpoint_allowed_ip: Địa chỉ IP được phép kết nối
 - DNS: Máy chủ DNS
-- status: Trạng thái (running/stopped)
-- traffic: Lịch sử lưu lượng
-- total_data: Tổng lưu lượng dữ liệu
-- total_sent: Tổng dữ liệu gửi đi
-- total_receive: Tổng dữ liệu nhận
+- endpoint_allowed_ip: Địa chỉ IP được phép kết nối
+- mtu: MTU cho peer
+- keepalive: Giá trị persistent keepalive
+- created_at: Thời gian tạo peer
 
 ## Lỗi thường gặp và cách khắc phục
 
-### 1. Lỗi JSON không hợp lệ
+### 1. Lỗi Redis không kết nối được
 
 **Lỗi:**
 ```
-json.decoder.JSONDecodeError: Invalid control character at: line 1 column X
+Warning: Could not configure Redis persistence - connection failed
 ```
 
-**Nguyên nhân:** File database JSON bị hỏng do ký tự không hợp lệ
+**Nguyên nhân:** Redis không chạy hoặc không thể kết nối
 
 **Giải pháp:**
-- Hệ thống sẽ tự động phát hiện và tạo lại database
-- Nếu vẫn gặp lỗi, bạn có thể xóa thủ công file trong thư mục `db/`
+- Kiểm tra nếu Redis đã được cài đặt: `redis-cli ping`
+- Đảm bảo Redis đang chạy: `sudo systemctl start redis`
+- Kiểm tra cấu hình Redis: `redis-cli CONFIG GET bind`
 
 ### 2. Lỗi không thể kết nối tới WireGuard
 
@@ -252,31 +292,24 @@ Command failed: wg show wg0 dump
 - Kiểm tra xem WireGuard đã được cài đặt: `wg --version`
 - Khởi động interface: `wg-quick up wg0`
 
-## Thêm ảnh vào tài liệu Markdown
+### 3. Lỗi không thể lưu cấu hình
 
-Để thêm ảnh vào tài liệu Markdown, sử dụng cú pháp:
-
-```markdown
-![Alt text](URL hoặc đường dẫn tới ảnh)
+**Lỗi:**
+```
+error sync: error opening '/etc/wireguard/wg0.conf.tmp': No such file or directory
 ```
 
-Ví dụ:
-```markdown
-![WireGuard Logo](https://www.wireguard.com/img/wireguard.svg)
-```
+**Nguyên nhân:** Thư mục WireGuard không tồn tại hoặc không có quyền ghi
 
-Để thêm ảnh từ thư mục local:
-```markdown
-![Screenshot](images/screenshot.png)
-```
+**Giải pháp:**
+- Tạo thư mục: `sudo mkdir -p /etc/wireguard`
+- Đặt quyền thích hợp: `sudo chmod 700 /etc/wireguard`
+- Thay đổi quyền sở hữu: `sudo chown user:user /etc/wireguard`
 
 ## Ghi chú
 
 - Mặc định, API chạy trên cổng 10086 và địa chỉ 0.0.0.0
 - Tài khoản mặc định: admin/admin
-- File cấu hình được lưu tại /etc/wireguard
-- IP được gán tự động trong dải 10.66.66.x
-
-## Sơ đồ hệ thống
-
-![System Architecture](https://i.imgur.com/example3.jpg) 
+- File cấu hình WireGuard được lưu tại /etc/wireguard
+- File cấu hình dashboard được lưu tại /etc/wireguard-dashboard/wg-dashboard.ini
+- IP được gán tự động trong dải 10.66.66.x 

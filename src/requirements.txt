@@ -4,3 +4,7 @@ ifcfg
 icmplib
 flask-qrcode
 requests
+redis
+ping3
+configparser
+qrcode
