@@ -2036,6 +2036,36 @@ def get_public_ip():
     # print(response.text)
     return response.text.strip()
 
+# Configure Redis persistence
+def configure_redis_persistence():
+    """Configure Redis to save data to disk properly"""
+    r = get_redis_client()
+    if not r:
+        print("[ERROR] Failed to configure Redis persistence - connection failed")
+        return False
+    
+    try:
+        # Check if persistence is already configured
+        config = r.config_get('save')
+        
+        # Configure automatic saving
+        # Save if at least 1 key changes in 60 seconds
+        r.config_set('save', '60 1')
+        
+        # Force an immediate save
+        save_result = r.save()
+        print(f"[INFO] Redis persistence configured, save result: {save_result}")
+        
+        return True
+    except redis.exceptions.ResponseError as e:
+        # This can happen in protected mode or when CONFIG commands are disabled
+        print(f"[WARNING] Could not configure Redis persistence: {str(e)}")
+        print("[WARNING] Make sure your Redis configuration allows persistence")
+        return False
+    except Exception as e:
+        print(f"[ERROR] Failed to configure Redis persistence: {str(e)}")
+        return False
+
 """
 Dashboard Initialization
 """
