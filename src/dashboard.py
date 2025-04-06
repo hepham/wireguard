@@ -1998,13 +1998,13 @@ PersistentKeepalive = {data.get('keep_alive', 21)}
     if not checkExist:
         # Sử dụng Lua script để cấp phát IP nguyên tử
         r = get_redis_client()
-        private_key = gen_private_key()
-        public_key = gen_public_key(private_key)
-        print("private_key:",private_key)
-        while private_key=="":
-        # Tạo private và public key trước
-            private_key = gen_private_key()
-            public_key = gen_public_key(private_key)
+        check = False
+        while not check:
+            key = gen_private_key()
+            private_key = key["private_key"]
+            public_key = key["public_key"]
+            if len(public_key) != 0 and public_key not in keys:
+                check = True
         
         # Kiểm tra và tạo set used_ips nếu chưa tồn tại
         used_ips_key = f"{REDIS_PREFIX}{config_name}:used_ips"
