@@ -2178,6 +2178,20 @@ def configure_redis_persistence():
         print(f"[ERROR] Failed to configure Redis persistence: {str(e)}")
         return False
 
+def cleanup_thread(interval=20):
+    """Thread để chạy cleanup_inactive_peers theo định kỳ"""
+    while True:
+        try:
+            print("[INFO] Running scheduled cleanup of inactive peers")
+            # Lấy tất cả cấu hình WireGuard hiện có
+            configs = get_conf_list()
+            for config in configs:
+                cleanup_inactive_peers(config, threshold=20)
+        except Exception as e:
+            print(f"[ERROR] Error in cleanup thread: {str(e)}")
+        # Chờ đến lần chạy tiếp theo
+        time.sleep(interval)
+
 """
 Dashboard Initialization
 """
@@ -2192,6 +2206,11 @@ def init_dashboard():
     
     # Try to configure Redis persistence
     configure_redis_persistence()
+    
+    # Khởi động thread dọn dẹp peers không hoạt động
+    cleanup_thread_instance = threading.Thread(target=cleanup_thread, daemon=True)
+    cleanup_thread_instance.start()
+    print("[INFO] Started automatic cleanup thread for inactive peers")
     
     # Defualt dashboard account setting
     if "Account" not in config:
