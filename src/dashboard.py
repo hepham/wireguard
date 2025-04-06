@@ -335,7 +335,7 @@ def search_peers_in_redis(config_name, search_term=None, sort_field=None):
     
     return peers
 
-def cleanup_inactive_peers(config_name='wg0', threshold=20):
+def cleanup_inactive_peers(config_name='wg0', threshold=180):
     """Xóa các peer không hoạt động trong 3 phút"""
     try:
         # Lấy danh sách peer hiện tại từ WireGuard
@@ -2184,7 +2184,7 @@ def cleanup_thread(interval=20):
         try:
             print("[INFO] Running scheduled cleanup of inactive peers")
             # Lấy tất cả cấu hình WireGuard hiện có
-            cleanup_inactive_peers()
+            cleanup_inactive_peers(config, threshold=20)
         except Exception as e:
             print(f"[ERROR] Error in cleanup thread: {str(e)}")
         # Chờ đến lần chạy tiếp theo
