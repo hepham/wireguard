@@ -1484,7 +1484,7 @@ def get_conf(config_name):
     if "Address" not in config_interface:
         conf_address = "N/A"
     else:
-        conf_address = config_interface['Address']
+        conf_address = config_interface["Address"]
     
     # Get peer data
     peer_data = get_peers(config_name, search, sort)
@@ -1988,6 +1988,46 @@ PersistentKeepalive = {data.get('keep_alive', 21)}
             break
             
     if not checkExist:
+        r = get_redis_client()
+        
+        # Sử dụng Redis Lua script để đảm bảo tính nguyên tử
+        ip_assignment_script = """
+        local config_key = KEYS[1]
+        local ip_range_start = tonumber(ARGV[1])
+        local ip_range_end = tonumber(ARGV[2])
+        
+        -- Lấy danh sách IP đã sử dụng
+        local used_ips = redis.call('SMEMBERS', config_key..':used_ips')
+        
+        -- Tìm IP tiếp theo còn trống
+        for ip = ip_range_start, ip_range_end do
+            local used = false
+            for _, used_ip in ipairs(used_ips) do
+                if tonumber(used_ip) == ip then
+                    used = true
+                    break
+                end
+            end
+            
+            if not used then
+                -- Đánh dấu IP này đã được sử dụng
+                redis.call('SADD', config_key..':used_ips', ip)
+                return ip
+            end
+        end
+        
+        return -1  -- Không còn IP trống
+        """
+        
+        # Đăng ký và chạy script
+        ip_script = r.register_script(ip_assignment_script)
+        next_ip = ip_script(keys=[f"{REDIS_PREFIX}{config_name}"], args=[2, 254])
+        
+        if next_ip == -1:
+            return jsonify({"error": "No IP addresses available"}), 409
+            
+        allowed_ips = f"{BASE_IP}.{next_ip}/32"
+        
         # Generate new key pair if peer doesn't exist
         check = False
         while not check:
