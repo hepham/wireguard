@@ -1,6 +1,6 @@
 #!/bin/bash
 
-app_name="app.py"
+app_name="dashboard.py"
 app_official_name="WGDashboard"
 dashes='------------------------------------------------------------'
 equals='============================================================'
@@ -30,10 +30,6 @@ install_wgd(){
     rm db/hi.txt >  /dev/null 2>&1
     if [ ! -d "log" ]
       then mkdir "log"
-    fi
-    # Ensure modules directory structure is present
-    if [ ! -d "modules" ]
-      then mkdir -p "modules"
     fi
     printf "| Installing latest Python dependencies                    |\n"
     python3 -m pip install -r requirements.txt >  /dev/null 2>&1
@@ -125,4 +121,3 @@ if [ "$#" != 1 ];
         help
     fi
 fi
-
