@@ -2125,6 +2125,7 @@ PersistentKeepalive = {data.get('keep_alive', 25)}
 
             
         except Exception as e:
+            print(f"[ERROR] Failed to create client: {str(e)}")
             return jsonify({"error": str(e)}), 500
 
     print(config_content)
