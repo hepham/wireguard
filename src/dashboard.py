@@ -296,6 +296,8 @@ def cleanup_inactive_peers(config_name='wg0', threshold=180):
         peers_key = get_peers_set_key(config_name)
         peer_ids = r.smembers(peers_key)
         current_time = int(time.time())
+        
+        peers_removed = False
 
         for peer_id in peer_ids:
             handshake_time = active_peers.get(peer_id, 0)
@@ -314,12 +316,14 @@ def cleanup_inactive_peers(config_name='wg0', threshold=180):
                     
                     # Xóa khỏi Redis
                     delete_peer_from_redis(config_name, peer_id)
+                    peers_removed = True
                     
                 except Exception as e:
                     print(f"error delete peer {peer_id}: {str(e)}")
 
-        # Lưu cấu hình
-        subprocess.check_call(['wg-quick', 'save', config_name])
+        # Lưu cấu hình only if peers were actually removed
+        if peers_removed:
+            save_wireguard_config(config_name)
 
     except Exception as e:
         print(f"error cleanup: {str(e)}")
@@ -1533,7 +1537,10 @@ def add_peer(config_name):
         # Add to WireGuard
         status = subprocess.check_output(f'wg set {config_name} peer {public_key} allowed-ips {allowed_ip}',
                                         shell=True, stderr=subprocess.STDOUT)
-        save_status = subprocess.check_output(f'wg-quick save {config_name}', shell=True, stderr=subprocess.STDOUT)
+        
+        # Save configuration with locking
+        if not save_wireguard_config(config_name):
+            return "Failed to save WireGuard configuration"
         
         # Save to Redis
         peer_data = {
@@ -1587,7 +1594,10 @@ def remove_peer(config_name):
         # Remove from WireGuard
         status = subprocess.check_output("wg set " + config_name + " peer " + delete_key + " remove", shell=True,
                                         stderr=subprocess.STDOUT)
-        status = subprocess.check_output("wg-quick save " + config_name, shell=True, stderr=subprocess.STDOUT)
+        
+        # Save configuration with locking
+        if not save_wireguard_config(config_name):
+            return "Failed to save WireGuard configuration"
         
         # Remove from Redis
         delete_peer_from_redis(config_name, delete_key)
@@ -1654,8 +1664,11 @@ def save_peer_setting(config_name):
         if allowed_ip == "": allowed_ip = '""'
         change_ip = subprocess.check_output(f'wg set {config_name} peer {id} allowed-ips {allowed_ip}',
                                             shell=True, stderr=subprocess.STDOUT)
-        save_change_ip = subprocess.check_output(f'wg-quick save {config_name}', shell=True,
-                                                stderr=subprocess.STDOUT)
+        
+        # Save configuration with locking
+        if not save_wireguard_config(config_name):
+            return jsonify({"status": "failed", "msg": "Failed to save WireGuard configuration"})
+            
         if change_ip.decode("UTF-8") != "":
             return jsonify({"status": "failed", "msg": change_ip.decode("UTF-8")})
         
@@ -1961,10 +1974,10 @@ PersistentKeepalive = {data.get('keep_alive', 21)}
                 f"wg set {config_name} peer {public_key} allowed-ips {allowed_ips}", 
                 shell=True, stderr=subprocess.STDOUT
             )
-            status = subprocess.check_output(
-                f"wg-quick save {config_name}", 
-                shell=True, stderr=subprocess.STDOUT
-            )
+            
+            # Save configuration with locking
+            if not save_wireguard_config(config_name):
+                return jsonify({"error": "Failed to save WireGuard configuration"}), 500
             
             # Get server details
             server_public_key = get_conf_pub_key(config_name)
@@ -2427,3 +2440,208 @@ def configure_redis_persistence():
     except Exception as e:
         print(f"[ERROR] Failed to configure Redis persistence: {str(e)}")
         return False
+
+import fcntl
+import errno
+import contextlib
+
+# Create a context manager for file locking
+@contextlib.contextmanager
+def file_lock(lock_file):
+    """Context manager for file-based locking to prevent concurrent access"""
+    lock_path = f"/tmp/wg_dashboard_{lock_file}.lock"
+    try:
+        # Open lock file
+        with open(lock_path, 'w') as f:
+            try:
+                # Try to acquire an exclusive lock (non-blocking)
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # We got the lock, yield control back to the context
+                yield
+            except IOError as e:
+                # Resource temporarily unavailable - another process has the lock
+                if e.errno == errno.EAGAIN:
+                    print(f"[WARNING] Another process is saving the {lock_file} configuration. Waiting for lock...")
+                    # Try again but block until we get the lock
+                    fcntl.flock(f, fcntl.LOCK_EX)
+                    yield
+                else:
+                    # Some other kind of IO error occurred
+                    raise
+            finally:
+                # Release the lock
+                fcntl.flock(f, fcntl.LOCK_UN)
+    except IOError as e:
+        print(f"[ERROR] Failed to obtain lock for {lock_file}: {str(e)}")
+        # Still yield control, even if we couldn't get a lock
+        yield
+    finally:
+        # Clean up the lock file if possible
+        try:
+            os.remove(lock_path)
+        except:
+            pass
+
+# Safe function to save WireGuard configuration
+def save_wireguard_config(config_name):
+    """Save WireGuard configuration with file locking to prevent race conditions"""
+    with file_lock(config_name):
+        try:
+            # Make sure the directory exists
+            os.makedirs('/etc/wireguard', exist_ok=True)
+            
+            # Save configuration
+            result = subprocess.check_output(['wg-quick', 'save', config_name], stderr=subprocess.STDOUT)
+            print(f"[INFO] Configuration saved for {config_name}")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"[ERROR] Failed to save configuration for {config_name}: {e.output.decode()}")
+            return False
+        except Exception as e:
+            print(f"[ERROR] Unexpected error saving configuration for {config_name}: {str(e)}")
+            return False
+
+def save_server_setting(request_data, config_name):
+    status_code = 400
+    result = {}
+    msg = "Configuration updated and restart Wireguard"
+    r = get_redis_client()
+    if not r:
+        return {"error": "Redis connection not available"}, 500
+
+    config = get_dashboard_conf()
+
+    try:
+        port = int(request_data["port"])
+        if not 0 < port <= 65535:
+            msg = "Invalid port number must be 1-65535"
+            result = {"error": msg}
+            return result, status_code
+    except:
+        port = 51820
+
+    try:
+        endpoint = request_data["endpoint"]
+        if len(endpoint.strip()) == 0:
+            msg = f"Invalid endpoint"
+            result = {"error": msg}
+            return result, status_code
+    except:
+        endpoint = config.get("Peers", "remote_endpoint", fallback=DEFAULT_ENDPOINT)
+
+    try:
+        remote_endpoint = request_data["remote_endpoint"]
+        if len(remote_endpoint.strip()) == 0:
+            msg = f"Invalid remote endpoint"
+            result = {"error": msg}
+            return result, status_code
+
+    except:
+        remote_endpoint = config.get("Peers", "remote_endpoint", fallback=DEFAULT_ENDPOINT)
+
+    try:
+        private_key = request_data["private_key"]
+        if len(private_key.strip()) == 0:
+            msg = f"invalid private_key"
+            result = {"error": msg}
+            return result, status_code
+    except:
+        conf_file = open(f"/etc/wireguard/{config_name}.conf")
+        lines = conf_file.readlines()
+        private_key = [line for line in lines if "PrivateKey" in line][0].split()[2].strip()
+        conf_file.close()
+        if not private_key:
+            private_key = gen_private_key()
+
+    try:
+        available_range = request_data["address_range"]
+        try:
+            socket.inet_aton(available_range.split("/")[0])
+            if not (0 <= int(available_range.split("/")[1]) <= 32):
+                msg = f"Invalid address CIDR range"
+                result = {"error": msg}
+                return result, status_code
+        except socket.error:
+            msg = f"Invalid address range"
+            result = {"error": msg}
+            return result, status_code
+    except:
+        conf_file = open(f"/etc/wireguard/{config_name}.conf")
+        lines = conf_file.readlines()
+        available_range = [line for line in lines if "Address" in line][0].split()[2].strip()
+        conf_file.close()
+        if not available_range:
+            available_range = "10.66.66.1/24"
+
+    try:
+        DNS = request_data["DNS"]
+        try:
+            for ip in DNS.split(","):
+                socket.inet_aton(ip)
+        except socket.error:
+            msg = f"Invalid DNS range"
+            result = {"error": msg}
+            return result, status_code
+    except:
+        DNS = DEFAULT_DNS
+
+    try:
+        # Get redis peer
+        peers = []
+        for key in r.scan_iter(f"{config_name}_peer:*"):
+            peers.append(r.get(key).decode('utf-8'))
+
+        peer_string = ""
+        print("peers:",peers)
+        for key in peers:
+            print("key:",key)
+            peer = json.loads(key)
+            print("PEER:",peer)
+            if "public_key" in peer and len(peer["public_key"]) >= 43:
+                peer_string += f"\n[Peer]\n"
+                peer_string += f"PublicKey = {peer['public_key']}\n"
+                peer_string += f"AllowedIPs = {peer['allowed_ip']}\n"
+                if "preshared_key" in peer and len(peer["preshared_key"]) >= 44:
+                    peer_string += f"PresharedKey = {peer['preshared_key']}\n"
+
+        try:
+            config.set("Peers", "remote_endpoint", remote_endpoint)
+            config.set("Peers", "peer_mtu", request_data["mtu"])
+        except Exception as e:
+            print(f"Failed to update config: {str(e)}")
+
+        save_dashboard_config(config)
+
+        # Save to file
+        with open(f"/etc/wireguard/{config_name}.conf.tmp", "w") as conf_file:
+            conf_file.write(f"""[Interface]
+PrivateKey = {private_key}
+Address = {available_range}
+ListenPort = {port}
+DNS = {DNS}
+PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o {endpoint} -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o {endpoint} -j MASQUERADE
+# SaveConfig = true
+# PersistentKeepalive = 25
+{peer_string}
+""")
+
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(f"/etc/wireguard/{config_name}.conf"), exist_ok=True)
+        
+        # Move temporary file to final location
+        os.replace(f"/etc/wireguard/{config_name}.conf.tmp", f"/etc/wireguard/{config_name}.conf")
+        
+        # Use wg-quick save with locking mechanism instead of direct subprocess call
+        if not save_wireguard_config(config_name):
+            raise Exception("Failed to save WireGuard configuration")
+        
+        result = {"success": True, "message": msg}
+        status_code = 200
+
+    except Exception as e:
+        print(f"Error saving server settings: {str(e)}")
+        result = {"error": str(e)}
+        status_code = 500
+
+    return result, status_code
