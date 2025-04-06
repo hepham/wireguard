@@ -2123,8 +2123,6 @@ AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = {data.get('keep_alive', 25)}
 """
 
-        except subprocess.CalledProcessError as exc:
-            return exc.output.decode('utf-8').strip()
             
         except Exception as e:
             return jsonify({"error": str(e)}), 500
