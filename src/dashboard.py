@@ -267,36 +267,44 @@ def get_peer_from_redis(config_name, peer_id):
         return None
 
 def delete_peer_from_redis(config_name, peer_id):
-    """Xóa peer từ Redis và giải phóng IP đã cấp phát"""
+    """Delete peer from Redis and release its IP"""
     r = get_redis_client()
     if not r:
         return False
     
     try:
-        # Lấy thông tin peer trước khi xóa
+        # Get peer data before deletion
         peer_key = get_peer_key(config_name, peer_id)
         peer_data = r.hgetall(peer_key)
         
-        # Lấy IP đã cấp phát
+        # Release IP from used_ips set
         if peer_data and 'allowed_ip' in peer_data:
             allowed_ip = peer_data['allowed_ip']
-            # Trích xuất octet cuối của IP (vd: từ 10.66.66.5/32 lấy ra 5)
-            if allowed_ip and allowed_ip.startswith('10.66.66.'):
+            if allowed_ip and allowed_ip.startswith(BASE_IP):
                 try:
+                    # Extract the last octet (e.g., from 10.66.66.5/32 get 5)
                     ip_last_octet = int(allowed_ip.split('.')[3].split('/')[0])
-                    # Xóa IP này khỏi tập hợp used_ips
-                    r.srem(f"{REDIS_PREFIX}{config_name}:used_ips", ip_last_octet)
-                except (IndexError, ValueError):
-                    pass
+                    # Remove from used_ips set
+                    used_ips_key = f"{REDIS_PREFIX}{config_name}:used_ips"
+                    r.srem(used_ips_key, ip_last_octet)
+                    print(f"[INFO] Released IP octet {ip_last_octet} for {config_name}")
+                except (IndexError, ValueError) as e:
+                    print(f"[ERROR] Failed to release IP for peer {peer_id}: {str(e)}")
         
-        # Xóa peer từ tập hợp peers
+        # Remove peer from peers set
         peers_key = get_peers_set_key(config_name)
         r.srem(peers_key, peer_id)
         
-        # Xóa key của peer
+        # Delete peer key
         r.delete(peer_key)
         
+        # Delete last seen key if exists
+        last_seen_key = get_last_seen_key(config_name, peer_id)
+        r.delete(last_seen_key)
+        
+        print(f"[INFO] Successfully deleted peer {peer_id} from Redis")
         return True
+        
     except Exception as e:
         print(f"[ERROR] Failed to delete peer from Redis: {str(e)}")
         return False
