@@ -343,7 +343,7 @@ def search_peers_in_redis(config_name, search_term=None, sort_field=None):
     
     return peers
 
-def cleanup_inactive_peers(config_name='wg0', threshold=180):
+def cleanup_inactive_peers(config_name='wg0', threshold=1800):
     """Xóa các peer không hoạt động trong 3 phút"""
     try:
         # Lấy danh sách peer hiện tại từ WireGuard
@@ -358,6 +358,7 @@ def cleanup_inactive_peers(config_name='wg0', threshold=180):
             if line:
                 parts = line.split('\t')
                 pubkey = parts[0]
+                print(f"ip: {parts[2]}")
                 last_handshake = int(parts[4])
                 active_peers[pubkey] = last_handshake
 
