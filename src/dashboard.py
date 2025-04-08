@@ -1636,11 +1636,7 @@ def add_peer(config_name):
         r.save()
         
         # Return new peer info
-        return jsonify({
-            "status": "success",
-            "peer_id": public_key,
-            "private_key": private_key
-        }),200
+        return "true"
     except subprocess.CalledProcessError as exc:
         return exc.output.decode("UTF-8").strip()
 
