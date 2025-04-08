@@ -2183,7 +2183,7 @@ def configure_redis_persistence():
         print(f"[ERROR] Failed to configure Redis persistence: {str(e)}")
         return False
 
-def cleanup_thread(interval=1000):
+def cleanup_thread(interval=300):
     """Thread để chạy cleanup_inactive_peers theo định kỳ"""
     while True:
         try:
