@@ -2193,18 +2193,7 @@ def cleanup_thread(interval=20):
         try:
             print("[INFO] Running scheduled cleanup of inactive peers")
             # Lấy tất cả cấu hình WireGuard hiện có
-            configs = get_conf_list()
-            for config in configs:
-                # get_conf_list() trả về danh sách dict, cần lấy tên cấu hình
-                config_name = config.get('conf')
-                if config_name:
-                    print(f"[INFO] Cleaning up inactive peers for {config_name}")
-                    cleanup_inactive_peers(config_name, threshold=1800)
-                    
-                    # Reset IP pool mỗi 5 phút (15 lần chạy x 20 giây = 300 giây)
-                    if int(time.time()) % 300 < interval:
-                        reset_ip_pool(config_name)
-                        
+            cleanup_inactive_peers()
         except Exception as e:
             print(f"[ERROR] Error in cleanup thread: {str(e)}")
         # Chờ đến lần chạy tiếp theo
@@ -2566,48 +2555,6 @@ def configure_redis_persistence():
         return False
 
 def reset_ip_pool(config_name):
-    """Reset IP pool dựa trên các peer hiện có"""
-    try:
-        r = get_redis_client()
-        if not r:
-            print("[ERROR] Redis connection failed, không thể reset IP pool")
-            return False
-            
-        # Xóa bộ IP cũ
-        used_ips_key = f"{REDIS_PREFIX}{config_name}:used_ips"
-        r.delete(used_ips_key)
-        print(f"[INFO] Đã xóa IP pool cũ cho {config_name}")
-        
-        # Tạo lại bộ IP mới từ các peer hiện có
-        peers = get_all_peers_from_redis(config_name)
-        for peer in peers:
-            allowed_ip = peer.get('allowed_ip', '')
-            if allowed_ip and allowed_ip.startswith(BASE_IP):
-                try:
-                    ip_last_octet = int(allowed_ip.split('.')[3].split('/')[0])
-                    r.sadd(used_ips_key, ip_last_octet)
-                    print(f"[INFO] Đã thêm IP {BASE_IP}.{ip_last_octet} vào pool")
-                except (IndexError, ValueError):
-                    pass
-                    
-        return True
-    except Exception as e:
-        print(f"[ERROR] Lỗi khi reset IP pool: {str(e)}")
-        return False
-
-# Sửa cleanup_thread để gọi reset_ip_pool sau khi dọn dẹp
-def cleanup_thread(interval=20):
-    """Thread để chạy cleanup_inactive_peers theo định kỳ"""
-    while True:
-        try:
-            print("[INFO] Running scheduled cleanup of inactive peers")
-            # Lấy tất cả cấu hình WireGuard hiện có
-            configs = get_conf_list()
-            for config in configs:
-                # get_conf_list() trả về danh sách dict, cần lấy tên cấu hình
-                config_name = config.get('conf')
-                if config_name:
-                    print(f"[INFO] Cleaning up inactive peers for {config_name}")
     """Reset IP pool cho một cấu hình WireGuard cụ thể"""
     r = get_redis_client()
     if not r:
