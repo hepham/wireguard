@@ -72,7 +72,7 @@ $("#save_peer").click(function(){
             data: JSON.stringify({
                 "private_key":$("#private_key").val(),
                 "public_key":$("#public_key").val(),
-                "allowed_ips": $("#allowed_ips").val(),
+                "allowed_ip": $("#allowed_ips").val(),
                 "name":$("#new_add_name").val(),
                 "DNS": $("#new_add_DNS").val(),
                 "endpoint_allowed_ip": $("#new_add_endpoint_allowed_ip").val(),
